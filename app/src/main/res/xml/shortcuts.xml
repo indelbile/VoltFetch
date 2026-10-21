@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the VoltFetch icon on the home screen -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="paste" android:enabled="true" android:icon="@drawable/sc_paste"
+        android:shortcutShortLabel="@string/sc_paste" android:shortcutLongLabel="@string/sc_paste_long">
+        <intent android:action="android.intent.action.MAIN" android:targetPackage="com.voltfetch.app" android:targetClass="com.voltfetch.app.AddActivity" />
+    </shortcut>
+    <shortcut android:shortcutId="media" android:enabled="true" android:icon="@drawable/sc_media"
+        android:shortcutShortLabel="@string/sc_media" android:shortcutLongLabel="@string/sc_media_long">
+        <intent android:action="android.intent.action.MAIN" android:targetPackage="com.voltfetch.app" android:targetClass="com.voltfetch.app.MainActivity">
+            <extra android:name="open" android:value="media" />
+        </intent>
+    </shortcut>
+    <shortcut android:shortcutId="browser" android:enabled="true" android:icon="@drawable/sc_browser"
+        android:shortcutShortLabel="@string/sc_browser" android:shortcutLongLabel="@string/sc_browser_long">
+        <intent android:action="android.intent.action.MAIN" android:targetPackage="com.voltfetch.app" android:targetClass="com.voltfetch.app.MainActivity">
+            <extra android:name="open" android:value="browser" />
+        </intent>
+    </shortcut>
+</shortcuts>

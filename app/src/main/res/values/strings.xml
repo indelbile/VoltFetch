@@ -2,4 +2,14 @@
 <resources>
     <string name="app_name">VoltFetch</string>
     <string name="share_label">Download with VoltFetch</string>
+    <!-- share-menu quick actions: queue straight away with the last-used quality -->
+    <string name="quick_video">Save video</string>
+    <string name="quick_audio">Save audio</string>
+    <!-- launcher shortcuts -->
+    <string name="sc_paste">Paste link</string>
+    <string name="sc_paste_long">Download the copied link</string>
+    <string name="sc_media">Media downloader</string>
+    <string name="sc_media_long">Save video or audio</string>
+    <string name="sc_browser">Browser</string>
+    <string name="sc_browser_long">Open VoltFetch browser</string>
 </resources>

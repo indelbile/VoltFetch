@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- launcher shortcut icon: white glyph on a coloured circle -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="48dp" android:height="48dp" android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#8B5CF6" android:pathData="M24,0a24,24 0 1,0 0.01,0Z"/>
+    <group android:translateX="12" android:translateY="12">
+        <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="2.2" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M4,4h16v16H4Z M8,4v16 M16,4v16 M4,9h4 M4,15h4 M16,9h4 M16,15h4"/>
+    </group>
+</vector>
