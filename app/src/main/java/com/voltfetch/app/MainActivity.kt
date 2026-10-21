@@ -91,6 +91,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         intent?.getStringExtra("tab")?.let { tab = it }
         build()
+        openFromShortcut(intent)
         showLastCrash()
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
@@ -100,6 +101,22 @@ class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         intent.getStringExtra("tab")?.let { select(it) }
+        openFromShortcut(intent)
+    }
+
+    /** Brings back the browser exactly as it was left (it's only minimised), or opens it fresh. */
+    private fun openBrowser() {
+        startActivity(Intent(this, BrowserActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+    }
+
+    /** Home-screen shortcuts "Media downloader" and "Browser" arrive here with an "open" extra. */
+    private fun openFromShortcut(i: Intent?) {
+        val target = i?.getStringExtra("open") ?: return
+        i.removeExtra("open")
+        when (target) {
+            "media" -> startActivity(Intent(this, MediaActivity::class.java))
+            "browser" -> openBrowser()
+        }
     }
 
     private fun build() {
@@ -162,7 +179,7 @@ class MainActivity : Activity() {
             pressable(0.88f)
         }
         bar.addView(fab, LinearLayout.LayoutParams(dp(56), dp(56)).apply { setMargins(dp(6), 0, dp(6), 0) })
-        item("browser", R.drawable.ic_globe, "Browser") { startActivity(Intent(this, BrowserActivity::class.java)) }
+        item("browser", R.drawable.ic_globe, "Browser") { openBrowser() }
         item("settings", R.drawable.ic_gear, "Settings") { startActivity(Intent(this, SettingsActivity::class.java)) }
         return k.hbox().apply {
             setPadding(dp(14), 0, dp(14), 0); clipChildren = false; clipToPadding = false
@@ -203,7 +220,7 @@ class MainActivity : Activity() {
         val grid = k.vbox(gap = dp(10))
         val rows = listOf(
             listOf(Triple(R.drawable.ic_link, "Paste a link", "One or many") to { startActivity(Intent(this, AddActivity::class.java)) },
-                Triple(R.drawable.ic_globe, "Browse", "Find files on a site") to { startActivity(Intent(this, BrowserActivity::class.java)) }),
+                Triple(R.drawable.ic_globe, "Browse", "Find files on a site") to { openBrowser() }),
             listOf(Triple(R.drawable.ic_scan, "Site grabber", "Every file on a page") to { startActivity(Intent(this, GrabberActivity::class.java)) },
                 Triple(R.drawable.ic_layers, "Batch", "img001…img100") to { startActivity(Intent(this, BatchActivity::class.java)) }),
             listOf(Triple(R.drawable.ic_film, "Media downloader", "Video resolutions & MP3 bitrates") to { startActivity(Intent(this, MediaActivity::class.java)) }),
@@ -489,11 +506,20 @@ class MainActivity : Activity() {
         banners.removeAllViews()
         if (wifi) banners.addView(banner(R.drawable.ic_wifi, p.hold, "Waiting for Wi-Fi", "$waiting ${if (waiting == 1) "download starts" else "downloads start"} when you connect. You can turn off Wi-Fi only in Settings.", null, null))
         clipOffer?.let { url ->
-            val name = com.voltfetch.engine.Names.fromUrl(url)
-            banners.addView(banner(R.drawable.ic_link, p.accent, "Download the link you copied?", name, "Download") {
-                clipOffer = null; bannerSig = ""
-                startActivity(Intent(this, AddActivity::class.java).putExtra(Intent.EXTRA_TEXT, url))
-            })
+            val site = com.voltfetch.engine.MediaSites.site(url)
+            if (site != null && !Links.looksLikeFile(url)) {
+                // a video page (YouTube, Instagram, X…): offer the Media downloader
+                banners.addView(banner(R.drawable.ic_film, p.violet, "Save the $site video you copied?", url.removePrefix("https://").removePrefix("www.").take(60), "Open") {
+                    clipOffer = null; bannerSig = ""
+                    startActivity(Intent(this, MediaActivity::class.java).putExtra("url", url))
+                })
+            } else {
+                val name = com.voltfetch.engine.Names.fromUrl(url)
+                banners.addView(banner(R.drawable.ic_link, p.accent, "Download the link you copied?", name, "Download") {
+                    clipOffer = null; bannerSig = ""
+                    startActivity(Intent(this, AddActivity::class.java).putExtra(Intent.EXTRA_TEXT, url))
+                })
+            }
         }
     }
 
@@ -523,7 +549,7 @@ class MainActivity : Activity() {
         // Android only lets the focused app read the clipboard.
         val cm = getSystemService(ClipboardManager::class.java) ?: return
         val text = runCatching { cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString() }.getOrNull() ?: return
-        val url = Links.find(text).firstOrNull() ?: return
+        val url = Links.find(text).let { l -> l.firstOrNull { com.voltfetch.engine.MediaSites.isKnown(it) } ?: l.firstOrNull() } ?: return
         val prefs = getSharedPreferences("ui", MODE_PRIVATE)
         if (prefs.getString("lastClip", "") == url) return
         prefs.edit().putString("lastClip", url).apply()
@@ -561,7 +587,8 @@ class MainActivity : Activity() {
             selected.isNotEmpty() -> clearSelection()
             searchRow.visibility == View.VISIBLE -> closeSearch()
             tab != "downloads" -> select("downloads")
-            else -> @Suppress("DEPRECATION") super.onBackPressed()
+            // leave the app without closing it: a minimised browser behind this screen keeps its page
+            else -> moveTaskToBack(true)
         }
     }
 
@@ -612,6 +639,11 @@ class MainActivity : Activity() {
     private inner class Holder(val root: FrameLayout, val card: LinearLayout) {
         val tile = FrameLayout(this@MainActivity)
         val tileIcon = ImageView(this@MainActivity)
+        val thumb = ImageView(this@MainActivity).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = rounded(Color.BLACK, dpf(15f)); clipToOutline = true
+            visibility = View.GONE
+        }
         val dot = View(this@MainActivity)
         val name = k.text("", 15f, p.fg, Type.medium, lines = 1)
         val status = k.text("", 12.5f, p.mute, lines = 1)
@@ -641,6 +673,7 @@ class MainActivity : Activity() {
             val row = k.hbox(dp(14)).apply { setPadding(dp(14), dp(14), dp(10), dp(14)) }
             outer.addView(row, FrameLayout.LayoutParams(-1, -2))
             val h = Holder(outer, row)
+            h.tile.addView(h.thumb, FrameLayout.LayoutParams(-1, -1))
             h.tile.addView(h.tileIcon, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
             h.tile.addView(h.dot, FrameLayout.LayoutParams(dp(13), dp(13), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, -dp(2), -dp(2)) })
             h.tile.clipChildren = false
@@ -664,6 +697,10 @@ class MainActivity : Activity() {
             val c = p.cat(v.category)
             h.tile.background = gradient(dpf(15f), alpha(c, .36f), alpha(c, .10f))
             h.tileIcon.setImageResource(categoryIcon(v.category)); h.tileIcon.imageTintList = android.content.res.ColorStateList.valueOf(c)
+            // media downloads show their thumbnail (fetched once, then cached)
+            val bmp = if (v.thumb.isNotEmpty()) Thumbs.get(this@MainActivity, v.id, v.thumb) { adapter.notifyDataSetChanged() } else null
+            if (bmp != null) { h.thumb.setImageBitmap(bmp); h.thumb.visibility = View.VISIBLE; h.tileIcon.visibility = View.GONE }
+            else { h.thumb.setImageDrawable(null); h.thumb.visibility = View.GONE; h.tileIcon.visibility = View.VISIBLE }
             h.dot.background = rounded(p.status(v.status), dpf(7f), p.ink, dp(2))
             val sel = v.id in selected
             h.card.background = if (sel) android.graphics.drawable.LayerDrawable(arrayOf(glass(p, dpf(22f), this@MainActivity), rounded(alpha(p.accent, .14f), dpf(22f), p.accent, dp(2))))
@@ -680,6 +717,7 @@ class MainActivity : Activity() {
                 v.status == Status.COMPLETE && v.verify == "ok" -> "Verified · ${whenText(v.completed)}"
                 v.status == Status.COMPLETE && v.verify == "mismatch" -> "Checksum doesn't match"
                 v.status == Status.COMPLETE -> "Finished ${whenText(v.completed)}"
+                v.status == Status.ERROR && v.retryAt > 0 -> "Connection problem · retrying by itself"
                 v.status == Status.ERROR -> v.error.ifEmpty { "Failed" }
                 else -> v.status.label()
             }

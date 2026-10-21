@@ -153,6 +153,7 @@ class Engine(private val storage: Storage, private val store: Store, private val
                 if (n % 5 == 0 && (dirty || activeCount() > 0)) save()
                 if (n % 5 == 0) applyLimit()
                 if (n % 10 == 0) checkSchedule()
+                if (n % 2 == 0) autoRetry()
             }
         }, 1, 1, TimeUnit.SECONDS)
     }
@@ -294,31 +295,48 @@ class Engine(private val storage: Storage, private val store: Store, private val
         return d
     }
 
-    /** Adds an embedded media-engine job to the same persistent queue as ordinary downloads. */
+    /** Adds an embedded media-engine job (any site yt-dlp supports) to the same persistent queue as ordinary downloads. */
     fun addMediaTask(
         url: String, title: String, kind: String, option: Int, queue: String = MAIN_QUEUE, start: Boolean = true,
         /** Subtitle languages to embed in a video ("" = none). */
         subs: String = "",
         /** Playlist title, shown in the note when the task came from a playlist. */
         playlist: String = "",
+        /** Extra choices, see [MediaOpts]. */
+        opts: Map<String, String> = emptyMap(),
+        /** Thumbnail address for the list and notifications. */
+        thumb: String = "",
+        /** [title] is only a placeholder (quick save): replace it with the real title when the engine reports it. */
+        autoTitle: Boolean = false,
     ): Download {
-        require(kind == "youtube_video" || kind == "youtube_audio") { "Unsupported media task" }
-        require(YouTube.isUrl(url)) { "Only YouTube addresses can be added as media tasks" }
-        val validOption = if (kind == "youtube_video") option in 144..4320 else option in 64..320
+        require(kind in MediaKinds.all) { "Unsupported media task" }
+        require(MediaSites.isWeb(url)) { "Media tasks need a web page address (http or https)" }
+        val validOption = when (kind) { MediaKinds.VIDEO -> option in 144..4320; MediaKinds.MP3 -> option in 64..320; else -> option == 0 }
         require(validOption) { "Invalid media option" }
-        val safeTitle = Names.sanitize(title.trim().ifBlank { "YouTube media" }.take(150))
+        val site = MediaSites.label(url)
+        val o = opts.filterKeys { it in MediaOpts.keys }.toMutableMap()
+        if (!YouTube.isUrl(url)) o.remove("sb") // SponsorBlock only knows YouTube
+        val clip = MediaOpts.clip(o)
+        if (clip == null) { o.remove("from"); o.remove("to") }
+        val base = Names.sanitize(title.trim().ifBlank { "$site media" }.take(140))
+        val clipTag = clip?.let { " (${MediaOpts.clock(it.first)}-${MediaOpts.clock(it.second)})".replace(':', '.') } ?: ""
         val d = Download(nextId.getAndIncrement(), url.trim())
-        d.name = if (kind == "youtube_audio") "$safeTitle.mp3" else "$safeTitle.mp4"
-        d.autoName = false
-        d.category = if (kind == "youtube_audio") "Music" else "Video"
-        d.mime = if (kind == "youtube_audio") "audio/mpeg" else "video/mp4"
+        d.name = Names.sanitize(base + clipTag) + when (kind) { MediaKinds.MP3 -> ".mp3"; MediaKinds.AUDIO -> ".m4a"; else -> ".mp4" }
+        d.autoName = autoTitle && clip == null
+        d.category = if (MediaKinds.isAudio(kind)) "Music" else "Video"
+        d.mime = when (kind) { MediaKinds.MP3 -> "audio/mpeg"; MediaKinds.AUDIO -> "audio/mp4"; else -> "video/mp4" }
         d.taskKind = kind
         d.taskOption = option
-        d.taskSubs = if (kind == "youtube_video") subs.trim() else ""
+        d.taskSubs = if (kind == MediaKinds.VIDEO) subs.trim() else ""
+        d.taskOpts = MediaOpts.encode(o)
+        d.thumb = thumb.trim().takeIf { MediaSites.isWeb(it) } ?: ""
         d.taskProgress = 0.0
         d.note = buildString {
-            append(if (kind == "youtube_audio") "YouTube · MP3 · $option kbps" else "YouTube · up to ${option}p")
+            append(site).append(" · ")
+            append(when (kind) { MediaKinds.MP3 -> "MP3 · $option kbps"; MediaKinds.AUDIO -> "original audio"; else -> "up to ${option}p" })
             if (d.taskSubs.isNotEmpty()) append(" · subtitles")
+            if (o["sb"] == "1") append(" · SponsorBlock")
+            if (clip != null) append(" · clip ${MediaOpts.clock(clip.first)}–${MediaOpts.clock(clip.second)}")
             if (playlist.isNotBlank()) append(" · ${playlist.trim().take(60)}")
         }
         d.queue = if (queue in settings.queueNames()) queue else MAIN_QUEUE
@@ -332,10 +350,13 @@ class Engine(private val storage: Storage, private val store: Store, private val
     }
 
     /** Resume by hand: Main-queue files wait their turn; files in a stopped queue start straight away. */
-    fun resume(ids: Collection<Long>) {
+    fun resume(ids: Collection<Long>) = resume(ids, auto = false)
+
+    private fun resume(ids: Collection<Long>, auto: Boolean) {
         val now = ArrayList<Download>()
         for (id in ids) get(id)?.let { d ->
             synchronized(d) {
+                if (!auto) { d.autoRetries = 0; d.retryAt = 0 }
                 if (!d.running && d.status != Status.COMPLETE) {
                     d.status = Status.QUEUED; d.error = ""
                     if (d.queue != MAIN_QUEUE && d.queue !in runningQueues) now.add(d)
@@ -350,7 +371,7 @@ class Engine(private val storage: Storage, private val store: Store, private val
     fun pause(ids: Collection<Long>) {
         for (id in ids) get(id)?.let { d ->
             if (d.running) stop(d, Status.PAUSED)
-            else synchronized(d) { if (d.status == Status.QUEUED) d.status = Status.PAUSED }
+            else synchronized(d) { d.retryAt = 0; if (d.status == Status.QUEUED) d.status = Status.PAUSED } // pausing also cancels an automatic retry
         }
         markDirty()
         processQueue()
@@ -386,13 +407,13 @@ class Engine(private val storage: Storage, private val store: Store, private val
         processQueue()
     }
 
-    /** Changes the address (for expired links), keeping progress. Media tasks only accept YouTube addresses. */
+    /** Changes the address (for expired links), keeping progress. Media tasks only accept web page addresses. */
     fun updateUrl(id: Long, url: String): Boolean {
         val d = get(id) ?: return false
         val clean = url.trim()
         if (clean.isEmpty()) return false
         val ok = synchronized(d) {
-            if (d.running || (d.taskKind.isNotEmpty() && !YouTube.isUrl(clean))) false
+            if (d.running || (d.taskKind.isNotEmpty() && !MediaSites.isWeb(clean))) false
             else { d.url = clean; d.error = ""; true }
         }
         if (ok) markDirty()
@@ -598,7 +619,11 @@ class Engine(private val storage: Storage, private val store: Store, private val
         } catch (e: Throwable) {
             synchronized(d) {
                 if (job.cancelled.get()) d.status = d.stopAs
-                else { d.status = Status.ERROR; d.error = friendly(e) }
+                else {
+                    d.status = Status.ERROR; d.error = friendly(e)
+                    // network trouble: try again by itself a few times, sooner if the connection comes back
+                    d.retryAt = if (isTransient(e) && d.autoRetries < retryDelays.size) clock() + retryDelays[d.autoRetries] else 0
+                }
             }
         } finally {
             synchronized(d) {
@@ -614,7 +639,7 @@ class Engine(private val storage: Storage, private val store: Store, private val
                     emit(Event("complete", id as Long, name as String))
                     if (synchronized(d) { d.checksum.isNotEmpty() }) pool.execute { verify(d.id, "") }
                 }
-                Status.ERROR -> emit(Event("error", id as Long, name as String, err as String))
+                Status.ERROR -> emit(Event(if (synchronized(d) { d.retryAt } > 0) "retrying" else "error", id as Long, name as String, err as String))
                 else -> {}
             }
             save()
@@ -631,7 +656,7 @@ class Engine(private val storage: Storage, private val store: Store, private val
         val task = synchronized(d) {
             d.lastTry = System.currentTimeMillis(); d.error = ""; d.status = Status.DOWNLOADING; d.taskStage = "Starting"
             if (d.taskProgress < 0) d.taskProgress = 0.0
-            MediaTask(d.id, d.url, d.taskKind, d.taskOption, d.taskSubs, d.category, d.name)
+            MediaTask(d.id, d.url, d.taskKind, d.taskOption, d.taskSubs, d.category, d.name, MediaOpts.parse(d.taskOpts))
         }
         markDirty()
         // yt-dlp's traffic goes through a local proxy so it shares the global speed limit and the user's proxy.
@@ -641,6 +666,11 @@ class Engine(private val storage: Storage, private val store: Store, private val
             handler.execute(task, job, MediaEnv(proxy?.url)) { mp ->
                 synchronized(d) {
                     if (job.cancelled.get()) return@synchronized
+                    // quick saves start with a placeholder name; use the real title once the engine reports it
+                    if (d.autoName && mp.title.isNotBlank() && d.locator.isEmpty()) {
+                        d.name = Names.sanitize(mp.title.take(140)) + "." + d.name.substringAfterLast('.', "mp4")
+                        d.autoName = false
+                    }
                     d.taskProgress = maxOf(d.taskProgress, mp.percent.coerceIn(0.0, 99.9))
                     d.taskStage = mp.stage; d.speed = mp.speed; d.taskEta = mp.eta
                 }
@@ -655,6 +685,35 @@ class Engine(private val storage: Storage, private val store: Store, private val
             d.size = result.size; d.got = result.size.coerceAtLeast(0); d.taskProgress = 100.0
             d.status = Status.COMPLETE; d.completed = System.currentTimeMillis(); d.error = ""
         }
+    }
+
+    /** Waits before each automatic retry of a download that failed because of the network. Replaceable in tests. */
+    var retryDelays: List<Long> = listOf(30_000L, 120_000L, 300_000L)
+
+    private fun isTransient(e: Throwable): Boolean = when (e) {
+        is FatalError -> false
+        is java.net.UnknownHostException, is java.net.SocketTimeoutException, is java.net.ConnectException,
+        is java.net.SocketException, is javax.net.ssl.SSLException, is java.io.EOFException -> true
+        else -> Regex("closed early|server answered 5\\d\\d|stopped before it finished|Check the connection|Connection (refused|reset)|timed out|Temporary failure|Network is unreachable", RegexOption.IGNORE_CASE)
+            .containsMatchIn(e.message ?: "")
+    }
+
+    /** Retries downloads whose network-related failure is due for another try. */
+    private fun autoRetry() {
+        if (!networkAllowed) return
+        val now = clock()
+        val due = synchronized(list) { list.filter { synchronized(it) { it.status == Status.ERROR && it.retryAt in 1..now } } }
+        if (due.isEmpty()) return
+        for (d in due) synchronized(d) { d.autoRetries++; d.retryAt = 0 }
+        resume(due.map { it.id }, auto = true)
+    }
+
+    /** The connection is back: retry network failures now instead of waiting out their delay. */
+    fun retryTransient() {
+        val now = clock()
+        val due = synchronized(list) { list.filter { synchronized(it) { it.status == Status.ERROR && it.retryAt > 0 } } }
+        for (d in due) synchronized(d) { d.retryAt = now }
+        autoRetry()
     }
 
     private fun friendly(e: Throwable): String = when (e) {

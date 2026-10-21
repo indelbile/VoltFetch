@@ -4,13 +4,15 @@ import android.content.Context
 import android.net.Uri
 import com.voltfetch.engine.Job
 import com.voltfetch.engine.MediaEnv
+import com.voltfetch.engine.MediaKinds
+import com.voltfetch.engine.MediaOpts
+import com.voltfetch.engine.MediaSites
 import com.voltfetch.engine.MediaProgress
 import com.voltfetch.engine.MediaProgressTracker
 import com.voltfetch.engine.MediaTask
 import com.voltfetch.engine.Names
 import com.voltfetch.engine.SpecialTransferHandler
 import com.voltfetch.engine.SpecialTransferResult
-import com.voltfetch.engine.YouTube
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import java.io.File
@@ -30,7 +32,7 @@ class AndroidMediaTransferHandler(private val ctx: Context) : SpecialTransferHan
     private val mediaExt = setOf("mp4", "m4a", "mp3", "webm", "mkv", "mov", "opus", "aac", "ogg", "m4v")
 
     override fun execute(task: MediaTask, job: Job, env: MediaEnv, progress: (MediaProgress) -> Unit): SpecialTransferResult {
-        if (!YouTube.isUrl(task.url)) throw IllegalArgumentException("Only YouTube addresses are supported")
+        if (!MediaSites.isWeb(task.url)) throw IllegalArgumentException("Media downloads need a web page address")
         if (job.cancelled.get()) throw CancellationException("Cancelled before start")
         val dir = File(root, task.id.toString()).apply { mkdirs() }
         var extras = true
@@ -41,7 +43,7 @@ class AndroidMediaTransferHandler(private val ctx: Context) : SpecialTransferHan
                 if (job.cancelled.get() || e is CancellationException || e is YoutubeDL.CanceledException) throw CancellationException("Media task cancelled")
                 val msg = e.message ?: ""
                 // Subtitles, cover art and tags are nice to have; never lose the download over them.
-                if (extras && Regex("subtitle|thumbnail|metadata|postprocessing|Embed", RegexOption.IGNORE_CASE).containsMatchIn(msg)) { extras = false; continue }
+                if (extras && Regex("subtitle|thumbnail|metadata|postprocessing|Embed|SponsorBlock|ModifyChapters|mutagen|AtomicParsley", RegexOption.IGNORE_CASE).containsMatchIn(msg)) { extras = false; continue }
                 throw IllegalStateException(readable(msg.ifBlank { e.javaClass.simpleName }))
             }
         }
@@ -50,14 +52,26 @@ class AndroidMediaTransferHandler(private val ctx: Context) : SpecialTransferHan
     private fun runOnce(task: MediaTask, job: Job, env: MediaEnv, dir: File, extras: Boolean, progress: (MediaProgress) -> Unit): SpecialTransferResult {
         val processId = "voltfetch-media-${task.id}-${System.nanoTime()}"
         val before = dir.listFiles()?.associate { it.name to it.lastModified() }.orEmpty()
+        val clip = MediaOpts.clip(task.opts)
+        val cookieFile = File(dir, "cookies.txt")
+        val useCookies = task.opts["ck"] == "1" && BrowserCookies.writeNetscape(task.url, cookieFile)
         val request = YoutubeDLRequest(task.url).apply {
             addOption("-o", File(dir, "%(title).150B [%(id)s].%(ext)s").absolutePath)
             addOption("--no-playlist"); addOption("--newline"); addOption("--no-mtime"); addOption("--continue")
             addOption("--retries", "10"); addOption("--fragment-retries", "10")
             env.proxyUrl?.let { addOption("--proxy", it) }
+            // the login from VoltFetch's own browser, for sites that hide videos behind one (Instagram, Facebook, X…)
+            if (useCookies) addOption("--cookies", cookieFile.absolutePath)
+            if (clip != null) {
+                addOption("--download-sections", "*${clip.first}-${clip.second}")
+                // cut exactly at the chosen times rather than the nearest keyframe (re-encodes just the clip)
+                if (task.kind == MediaKinds.VIDEO) addOption("--force-keyframes-at-cuts")
+            }
+            // SponsorBlock: community-marked sponsor, self-promo, "subscribe" and non-music parts are removed
+            if (extras && task.opts["sb"] == "1") addOption("--sponsorblock-remove", "sponsor,selfpromo,interaction,music_offtopic")
         }
         when (task.kind) {
-            "youtube_video" -> request.apply {
+            MediaKinds.VIDEO -> request.apply {
                 // Best quality up to the chosen height; prefer H.264 + AAC (plays everywhere), fall back to VP9/AV1 at 1440p+.
                 addOption("-f", "bv*+ba/b")
                 addOption("-S", "res:${task.option},vcodec:h264,acodec:aac")
@@ -74,15 +88,21 @@ class AndroidMediaTransferHandler(private val ctx: Context) : SpecialTransferHan
                     }
                 }
             }
-            "youtube_audio" -> request.apply {
+            MediaKinds.MP3 -> request.apply {
                 addOption("-f", "ba/b")
                 addOption("-x"); addOption("--audio-format", "mp3"); addOption("--audio-quality", "${task.option}K")
+                if (extras) { addOption("--embed-metadata"); addOption("--embed-thumbnail"); addOption("--convert-thumbnails", "jpg") }
+            }
+            MediaKinds.AUDIO -> request.apply {
+                // the site's own audio, copied as it is (no re-encoding): AAC in .m4a when offered, else e.g. Opus
+                addOption("-f", "ba[acodec^=mp4a]/ba[ext=m4a]/ba/b")
+                addOption("-x"); addOption("--audio-format", "best")
                 if (extras) { addOption("--embed-metadata"); addOption("--embed-thumbnail"); addOption("--convert-thumbnails", "jpg") }
             }
             else -> throw IllegalArgumentException("Unknown media task type: ${task.kind}")
         }
 
-        val tracker = MediaProgressTracker(task.kind)
+        val tracker = MediaProgressTracker(task.kind, clip?.let { (it.second - it.first).toDouble() } ?: 0.0)
         val running = AtomicBoolean(true)
         val ytdl = YoutubeDL.getInstance()
         job.onCancel { runCatching { ytdl.destroyProcessById(processId) } }
@@ -97,13 +117,15 @@ class AndroidMediaTransferHandler(private val ctx: Context) : SpecialTransferHan
             ytdl.execute(request, processId) { _, _, line -> tracker.feed(line)?.let(progress) }
         } finally {
             running.set(false)
+            runCatching { cookieFile.delete() } // never leave a copy of the login behind
         }
         if (job.cancelled.get()) throw CancellationException("Media task cancelled")
 
-        val wanted = if (task.kind == "youtube_audio") "mp3" else "mp4"
+        val wanted = when (task.kind) { MediaKinds.MP3 -> "mp3"; MediaKinds.AUDIO -> "m4a"; else -> "mp4" }
+        // skip the per-stream parts yt-dlp leaves before merging ("Title [id].f137.mp4")
         val outputs = dir.listFiles()?.filter { f ->
             val ext = f.extension.lowercase(Locale.ROOT)
-            f.isFile && f.length() > 0L && ext in mediaExt && !f.name.matches(Regex(".*\\.f\\d+[-\\w]*\\.\\w+$"))
+            f.isFile && f.length() > 0L && ext in mediaExt && !f.name.matches(Regex(".*]\\.f.+\\.\\w+$"))
         }.orEmpty()
         val changed = outputs.filter { it.lastModified() > (before[it.name] ?: 0L) }
         val output = (changed.ifEmpty { outputs }).sortedWith(compareBy<File>({ it.extension.lowercase(Locale.ROOT) != wanted }, { -it.lastModified() })).firstOrNull()
@@ -158,10 +180,13 @@ class AndroidMediaTransferHandler(private val ctx: Context) : SpecialTransferHan
         val lines = raw.lines().map { it.trim() }.filter { it.isNotEmpty() }
         val err = lines.lastOrNull { it.startsWith("ERROR:") }?.removePrefix("ERROR:")?.trim() ?: lines.lastOrNull() ?: raw
         val hint = when {
+            Regex("Unsupported URL", RegexOption.IGNORE_CASE).containsMatchIn(err) ->
+                " · The media engine doesn't support this site. Try the normal downloader (+) instead."
+            Regex("login required|log in|logged-in|cookies|confirm your age|age-restricted|age restricted|inappropriate for some users|Private video|members-only|rate-limit", RegexOption.IGNORE_CASE).containsMatchIn(err) ->
+                " · This needs a login. Sign in to the site in VoltFetch's Browser tab, then retry with \"Use my browser login\" on."
             Regex("Sign in to confirm|not a bot|HTTP Error 403|Unable to extract|nsig|Precondition", RegexOption.IGNORE_CASE).containsMatchIn(err) ->
-                " · YouTube may have changed. Try Settings › Media engine › Update now."
+                " · The site may have changed. Try Settings › Media engine › Update media engine."
             Regex("Errno|timed out|Connection (refused|reset|aborted)|Temporary failure|Network is unreachable|Unable to download", RegexOption.IGNORE_CASE).containsMatchIn(err) -> " · Check the connection and tap Retry."
-            Regex("Private video|members-only|confirm your age|age-restricted|age restricted|inappropriate for some users", RegexOption.IGNORE_CASE).containsMatchIn(err) -> " · This video needs an account that VoltFetch can't use."
             else -> ""
         }
         return (err.take(400) + hint)

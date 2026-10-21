@@ -117,7 +117,7 @@ class DetailActivity : Screen() {
         stat(if (v.active) Fmt.speed(v.speed).ifEmpty { "—" } else "—", "Speed", if (v.active) p.tide else p.fg)
         stat(if (v.active) Fmt.eta(v.etaSeconds).ifEmpty { "—" } else if (v.status == Status.COMPLETE) "Done" else "—", "Time left")
         stat(if (v.size > 0) Fmt.size(v.size) else "Unknown", "Size")
-        if (v.isMedia) stat(if (v.taskKind == "youtube_audio") "${v.taskOption} kbps" else "≤ ${v.taskOption}p",
+        if (v.isMedia) stat(when (v.taskKind) { com.voltfetch.engine.MediaKinds.MP3 -> "${v.taskOption} kbps"; com.voltfetch.engine.MediaKinds.AUDIO -> "Original"; else -> "≤ ${v.taskOption}p" },
             if (v.status == Status.QUEUED) engine.placeInLine(id).takeIf { it > 0 }?.let { "Quality · #$it in line" } ?: "Quality" else "Quality")
         else stat(when {
             v.active -> "$conns"
@@ -166,7 +166,7 @@ class DetailActivity : Screen() {
     }
 
     private fun renderFacts(v: DView) {
-        val sig = listOf(v.url, v.name, v.status, v.resumable, v.error, v.note, v.verify, v.hash, v.checksum, v.completed, v.category, v.queue, v.hasLogin, v.taskSubs, p.dark).joinToString("|")
+        val sig = listOf(v.url, v.name, v.status, v.resumable, v.error, v.note, v.verify, v.hash, v.checksum, v.completed, v.category, v.queue, v.hasLogin, v.taskSubs, v.taskOpts, p.dark).joinToString("|")
         if (sig == factSig) return
         factSig = sig
         facts.removeAllViews()
@@ -176,8 +176,17 @@ class DetailActivity : Screen() {
         fact("Category", v.category, R.drawable.ic_tag, { pickCategory(v) }, p.cat(v.category))
         fact("Queue", if (v.queue == MAIN_QUEUE) "Main" else v.queue, R.drawable.ic_calendar, if (v.status == Status.COMPLETE) null else ({ queueMenu(v) }))
         if (v.isMedia) {
-            fact("Format", if (v.taskKind == "youtube_audio") "MP3 · ${v.taskOption} kbps · cover art and tags"
-                else "MP4 · best quality up to ${v.taskOption}p" + if (v.taskSubs.isNotEmpty()) " · subtitles (${v.taskSubs})" else "", R.drawable.ic_film, null)
+            val o = com.voltfetch.engine.MediaOpts.parse(v.taskOpts)
+            fact("Format", buildString {
+                append(when (v.taskKind) {
+                    com.voltfetch.engine.MediaKinds.MP3 -> "MP3 · ${v.taskOption} kbps · cover art and tags"
+                    com.voltfetch.engine.MediaKinds.AUDIO -> "Original audio, not re-encoded · cover art and tags"
+                    else -> "MP4 · best quality up to ${v.taskOption}p" + if (v.taskSubs.isNotEmpty()) " · subtitles (${v.taskSubs})" else ""
+                })
+                com.voltfetch.engine.MediaOpts.clip(o)?.let { append("\nOnly ${com.voltfetch.engine.MediaOpts.clock(it.first)}–${com.voltfetch.engine.MediaOpts.clock(it.second)}") }
+                if (o["sb"] == "1") append("\nSponsor and non-music parts cut (SponsorBlock)")
+                if (o["ck"] == "1") append("\nUses the browser login if the site needs one")
+            }, R.drawable.ic_film, null)
             fact("Resume", "Pausing keeps what's downloaded; the media engine continues from there.", R.drawable.ic_refresh, null)
         } else fact("Resume", when {
             v.resumable -> "Supported. Pausing keeps your progress."
@@ -284,11 +293,11 @@ class DetailActivity : Screen() {
                 toast("Address copied")
             } else {
                 val input = k.input("https://…", v.url, multi = true)
-                dialog().setTitle("Change address").setMessage(if (v.isMedia) "Paste the YouTube link for the same video." else "Paste a fresh link to the same file. Progress so far is kept.")
+                dialog().setTitle("Change address").setMessage(if (v.isMedia) "Paste the page link for the same video." else "Paste a fresh link to the same file. Progress so far is kept.")
                     .setView(padded(input))
                     .setPositiveButton("Save") { _, _ ->
                         toast(if (engine.updateUrl(id, input.text.toString())) "Address updated. Tap Resume to continue."
-                            else if (v.isMedia) "That isn't a YouTube link" else "Couldn't change the address while downloading")
+                            else if (v.isMedia) "That isn't a web page link" else "Couldn't change the address while downloading")
                     }
                     .setNegativeButton("Cancel", null).show()
             }

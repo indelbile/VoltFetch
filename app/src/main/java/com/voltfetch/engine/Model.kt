@@ -104,6 +104,8 @@ class Download(val id: Long, var url: String) {
     var taskOption = 0
     var taskProgress = -1.0
     var taskSubs = ""      // subtitle languages to embed ("" = none)
+    var taskOpts = ""      // extra media choices, see MediaOpts
+    var thumb = ""         // thumbnail address shown in the list and notifications
     var taskStage = ""     // runtime: what the media engine is doing right now
     var taskEta = -1.0     // runtime: seconds left as reported by the media engine
 
@@ -113,6 +115,8 @@ class Download(val id: Long, var url: String) {
     internal var lastTick = 0L
     internal var job: Job? = null
     internal var stopAs = Status.PAUSED
+    internal var autoRetries = 0      // automatic retries used since the last manual start
+    @Volatile var retryAt = 0L        // when the next automatic retry is due (0 = none)
     val running: Boolean get() = job != null
 
     @Synchronized fun recount() { if (segments.isNotEmpty()) got = segments.sumOf { it.done } }
@@ -121,7 +125,7 @@ class Download(val id: Long, var url: String) {
         id, url, referer, name, category, mime, size, got, resumable, status, error, speed,
         added, lastTry, completed, locator, checksum, verify, hash, hashAlgo, queuePos, note, queue, auth.isNotEmpty(),
         segments.map { SegView(it.start, it.end, it.done, it.active, it.speed) }, taskKind, taskOption, taskProgress,
-        taskSubs, taskStage, taskEta,
+        taskSubs, taskStage, taskEta, taskOpts, thumb, retryAt,
     )
 
     @Synchronized fun toMap(): Map<String, Any?> = mapOf(
@@ -133,6 +137,7 @@ class Download(val id: Long, var url: String) {
         "queuePos" to queuePos, "note" to note, "queue" to queue, "cookies" to cookies, "agent" to agent, "auth" to auth, "autoName" to autoName,
         "segments" to segments.map { listOf(it.start, it.end, it.done) },
         "taskKind" to taskKind, "taskOption" to taskOption, "taskProgress" to taskProgress, "taskSubs" to taskSubs,
+        "taskOpts" to taskOpts, "thumb" to thumb,
     )
 
     companion object {
@@ -147,7 +152,7 @@ class Download(val id: Long, var url: String) {
             d.hashAlgo = m.str("hashAlgo"); d.queuePos = m.long("queuePos"); d.note = m.str("note")
             d.queue = m.str("queue", MAIN_QUEUE).ifEmpty { MAIN_QUEUE }; d.cookies = m.str("cookies"); d.agent = m.str("agent"); d.auth = m.str("auth"); d.autoName = m.bool("autoName", false)
             d.taskKind = m.str("taskKind"); d.taskOption = m.int("taskOption"); d.taskProgress = (m["taskProgress"] as? Number)?.toDouble() ?: -1.0
-            d.taskSubs = m.str("taskSubs")
+            d.taskSubs = m.str("taskSubs"); d.taskOpts = m.str("taskOpts"); d.thumb = m.str("thumb")
             for (s in m.list("segments")) {
                 val a = (s as? List<*>) ?: continue
                 if (a.size == 3) d.segments.add(Segment((a[0] as Number).toLong(), (a[1] as Number).toLong(), (a[2] as Number).toLong()))
@@ -169,6 +174,9 @@ data class View(
     val queue: String, val hasLogin: Boolean,
     val segs: List<SegView>, val taskKind: String = "", val taskOption: Int = 0, val taskProgress: Double = -1.0,
     val taskSubs: String = "", val taskStage: String = "", val taskEta: Double = -1.0,
+    val taskOpts: String = "", val thumb: String = "",
+    /** When a failed download will be retried automatically (0 = it won't). */
+    val retryAt: Long = 0,
 ) {
     val isMedia: Boolean get() = taskKind.isNotEmpty()
     val active: Boolean get() = status == Status.CONNECTING || status == Status.DOWNLOADING

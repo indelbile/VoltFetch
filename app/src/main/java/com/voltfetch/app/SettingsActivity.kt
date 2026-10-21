@@ -104,6 +104,13 @@ class SettingsActivity : Screen() {
             toggleRow("Check for updates weekly", "Only on Wi-Fi, and never while a media download is running.", MediaEngine.autoUpdate(this)) { MediaEngine.setAutoUpdate(this, it) },
         )
 
+        // Followed playlists: checked every night, new videos are queued
+        val follows = PlaylistSync.list(this)
+        section("Followed playlists",
+            navRow(R.drawable.ic_calendar, if (follows.isEmpty()) "No followed playlists" else "${follows.size} followed",
+                if (follows.isEmpty()) "Follow one from the Media downloader: new videos are downloaded every night." else "Checked every night at 3:00. Tap to see, check now or stop following.", p.violet) { showFollows() },
+        )
+
         // Data
         section("Your list",
             navRow(R.drawable.ic_export, "Export links", "Save every download's address to a text file", p.done) { exportList() },
@@ -119,6 +126,36 @@ class SettingsActivity : Screen() {
         about.addView(k.badge("Version $ver", p.accent))
         about.addView(k.text("Fast, multi-connection downloads for Android.\nFiles are saved in Download/VoltFetch, sorted by type.", 13f, p.mute).apply { gravity = Gravity.CENTER; setLineSpacing(0f, 1.3f); setPadding(dp(16), 0, dp(16), 0) })
         body.addView(k.card(about))
+    }
+
+    private fun showFollows() {
+        val follows = PlaylistSync.list(this)
+        if (follows.isEmpty()) { toast("Follow a playlist from the Media downloader first"); return }
+        val box = k.vbox(gap = dp(12)).apply { setPadding(dp(22), dp(8), dp(22), dp(4)) }
+        lateinit var dlg: android.app.AlertDialog
+        for (f in follows) {
+            val row = k.hbox(dp(10))
+            val tx = k.vbox(gap = dp(2))
+            tx.addView(k.text(f.title, 14.5f, p.fg, Type.medium, lines = 2))
+            tx.addView(k.text("${com.voltfetch.engine.MediaSites.label(f.url)} · ${f.what} · ${if (f.lastSync > 0) "${f.lastResult}, ${whenText(f.lastSync)}" else "not checked yet"}", 12f, p.mute))
+            row.addView(tx, lp(0, -2, 1f))
+            row.addView(k.button("Stop", "ghost") {
+                dialog().setTitle("Stop following?").setMessage("\"${f.title}\" won't be checked any more. Videos already downloaded stay where they are.")
+                    .setPositiveButton("Stop following") { _, _ -> PlaylistSync.unfollow(this, f.id); dlg.dismiss(); frame(); toast("Stopped following") }
+                    .setNegativeButton("Cancel", null).show()
+            }.apply { minHeight = dp(40); minimumHeight = dp(40) }, android.widget.LinearLayout.LayoutParams(-2, dp(40)))
+            box.addView(row)
+        }
+        dlg = dialog().setTitle("Followed playlists").setView(android.widget.ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Check now") { _, _ ->
+                toast("Checking followed playlists…")
+                Thread {
+                    val n = runCatching { PlaylistSync.syncAll(this) }.getOrDefault(0)
+                    runOnUiThread { if (!isFinishing && !isDestroyed) { toast(if (n == 0) "No new videos" else "Added $n new videos"); frame() } }
+                }.start()
+            }
+            .setNegativeButton("Close", null).create()
+        dlg.show()
     }
 
     private fun updateEngine() {

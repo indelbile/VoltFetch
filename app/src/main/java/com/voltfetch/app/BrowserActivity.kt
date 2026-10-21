@@ -36,6 +36,11 @@ import com.voltfetch.engine.NoCapture
 /**
  * A browser for finding files. It notices video and audio a page loads, offers "Download with VoltFetch"
  * on long-pressed links, and hands browser downloads (with the site's cookies) to VoltFetch.
+ *
+ * It behaves like a minimisable tab: the Home button (or Back on the first page, or a long-press on Back)
+ * returns to VoltFetch's main screen while this screen stays alive behind it, and the main screen's Browser
+ * button brings it back exactly where it was. If Android closes it in the background, the page and its
+ * history are restored; "Close browser" in the menu really ends the session.
  */
 class BrowserActivity : Activity() {
     private lateinit var p: Palette
@@ -58,6 +63,7 @@ class BrowserActivity : Activity() {
     private var pageUrl = ""
     private var pageTitle = ""
     private var loading = false
+    private val session get() = getSharedPreferences("browser", MODE_PRIVATE)
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -74,6 +80,7 @@ class BrowserActivity : Activity() {
             settings.builtInZoomControls = true
             settings.displayZoomControls = false
             settings.mediaPlaybackRequiresUserGesture = true
+            if (session.getBoolean("desktop", false)) settings.userAgentString = DESKTOP_AGENT
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             if (android.os.Build.VERSION.SDK_INT >= 29) settings.forceDark = if (p.dark) WebSettings.FORCE_DARK_AUTO else WebSettings.FORCE_DARK_OFF
             setBackgroundColor(p.ink)
@@ -119,7 +126,49 @@ class BrowserActivity : Activity() {
         }
 
         val start = intent?.dataString ?: Links.find(intent?.getStringExtra(Intent.EXTRA_TEXT)).firstOrNull()
-        if (start != null) go(start) else showHome()
+        when {
+            start != null -> go(start)
+            // Android closed this screen in the background: bring back the page and its back/forward history
+            savedInstanceState != null && web.restoreState(savedInstanceState) != null -> {
+                home.visibility = View.GONE
+                pageUrl = web.url ?: ""
+                showAddress()
+            }
+            // the app was restarted: reopen the page that was open last time
+            session.getString("lastUrl", "").orEmpty().startsWith("http") -> go(session.getString("lastUrl", "")!!)
+            else -> showHome()
+        }
+    }
+
+    /** Opened again from the main screen (it was only minimised): keep the page, unless a new link was passed. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val url = intent.dataString ?: Links.find(intent.getStringExtra(Intent.EXTRA_TEXT)).firstOrNull()
+        if (url != null) go(url)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        if (home.visibility != View.VISIBLE) runCatching { web.saveState(outState) }
+    }
+
+    /** Back to VoltFetch's main screen; this screen (page, history, scroll position) stays open behind it. */
+    private fun minimize(showHint: Boolean = false) {
+        currentFocus?.let { getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(it.windowToken, 0); it.clearFocus() }
+        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+        @Suppress("DEPRECATION") overridePendingTransition(R.anim.hold, R.anim.exit_down)
+        if (showHint && pageUrl.isNotEmpty() && !session.getBoolean("minimizeHintShown", false)) {
+            session.edit().putBoolean("minimizeHintShown", true).apply()
+            toast("The page stays open. Tap Browser to come back to it.")
+        }
+    }
+
+    /** Ends the browsing session: the next visit starts on the start page. */
+    private fun closeBrowser() {
+        session.edit().remove("lastUrl").apply()
+        web.stopLoading()
+        finish()
     }
 
     // ------------------------------------------------------------------ chrome
@@ -127,7 +176,10 @@ class BrowserActivity : Activity() {
     private fun buildBar(): LinearLayout {
         val b = k.hbox(dp(8))
         b.background = android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(p.ink, alpha(p.ink, .96f)))
-        b.addView(k.orb(R.drawable.ic_back, "Back") { back() }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        b.addView(k.orb(R.drawable.ic_back, "Back") { back() }.apply {
+            // long-press Back: straight to the main screen
+            setOnLongClickListener { haptic(it, true); minimize(); true }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
         val field = k.hbox(dp(6)).apply { setPadding(dp(12), 0, dp(4), 0); background = glass(p, dpf(22f), this@BrowserActivity) }
         lock = k.icon(R.drawable.ic_lock, p.done, 15)
         field.addView(lock)
@@ -143,6 +195,7 @@ class BrowserActivity : Activity() {
         reload = k.iconButton(R.drawable.ic_refresh, "Reload") { if (loading) web.stopLoading() else if (pageUrl.isNotEmpty()) web.reload() }
         field.addView(reload, LinearLayout.LayoutParams(dp(40), dp(40)))
         b.addView(field, lp(0, dp(46), 1f))
+        b.addView(k.orb(R.drawable.ic_home, "VoltFetch home") { minimize(showHint = true) }, LinearLayout.LayoutParams(dp(44), dp(44)))
         b.addView(k.orb(R.drawable.ic_more, "More") { menu() }, LinearLayout.LayoutParams(dp(44), dp(44)))
         return b
     }
@@ -194,7 +247,7 @@ class BrowserActivity : Activity() {
         }
         val note = k.hbox(dp(10)).apply { setPadding(dp(14), dp(12), dp(14), dp(12)); background = rounded(alpha(p.hold, .12f), dpf(16f)) }
         note.addView(k.icon(R.drawable.ic_alert, p.hold, 18))
-        note.addView(k.text("For public YouTube videos, open Media downloader to choose a resolution or extract MP3. Downloads and audio extraction run locally on this phone; no backend is required.", 12.5f, p.fg).apply { setLineSpacing(0f, 1.2f) }, lp(0, -2, 1f))
+        note.addView(k.text("For YouTube, Instagram, Facebook, X, Vimeo and many other sites, open the Media downloader to choose a quality or save the audio. It uses this browser's sign-in when a site needs one.", 12.5f, p.fg).apply { setLineSpacing(0f, 1.2f) }, lp(0, -2, 1f))
         note.setOnClickListener { startActivity(Intent(this, MediaActivity::class.java)) }
         note.pressable()
         box.addView(note, lp(-1, -2).apply { topMargin = dp(10) })
@@ -204,6 +257,7 @@ class BrowserActivity : Activity() {
     private fun showHome() {
         home.visibility = View.VISIBLE; home.alpha = 0f; home.animate().alpha(1f).setDuration(250).start()
         pageUrl = ""; address.setText(""); lock.visibility = View.GONE
+        session.edit().remove("lastUrl").apply()
         media.clear(); updatePill()
     }
 
@@ -220,11 +274,12 @@ class BrowserActivity : Activity() {
         web.loadUrl(url)
     }
 
+    /** Back goes through the page history; on the first page it returns to the main screen and keeps the page. */
     private fun back() {
         when {
+            address.hasFocus() -> { address.clearFocus(); getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(address.windowToken, 0) }
             web.canGoBack() && home.visibility != View.VISIBLE -> web.goBack()
-            home.visibility != View.VISIBLE -> { web.loadUrl("about:blank"); showHome() }
-            else -> finish()
+            else -> minimize(showHint = true)
         }
     }
 
@@ -238,9 +293,20 @@ class BrowserActivity : Activity() {
             items.add("Grab files from this page" to { startActivity(Intent(this, GrabberActivity::class.java).putExtra("url", pageUrl)) })
             items.add("Download this address" to { openAdd(pageUrl, "", -1, "", web.settings.userAgentString) })
             items.add("Copy address" to { copy(pageUrl) })
+            items.add("Share page" to { runCatching { startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT, pageTitle).putExtra(Intent.EXTRA_TEXT, pageUrl), "Share page")) } })
             items.add("Open in another browser" to { runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(pageUrl))) } })
         }
-        items.add("Home" to { web.loadUrl("about:blank"); showHome() })
+        val desktop = session.getBoolean("desktop", false)
+        items.add((if (desktop) "✓ Desktop site" else "Desktop site") to {
+            // some sites only show full pages, videos or download links to desktop browsers
+            session.edit().putBoolean("desktop", !desktop).apply()
+            web.settings.userAgentString = if (desktop) null else DESKTOP_AGENT
+            if (pageUrl.isNotEmpty()) web.reload()
+            toast(if (desktop) "Mobile site" else "Desktop site")
+        })
+        items.add("Start page" to { web.loadUrl("about:blank"); showHome() })
+        items.add("Back to VoltFetch (keep this page)" to { minimize() })
+        items.add("Close browser" to { closeBrowser() })
         items.add("Clear cookies and history" to {
             dialogB().setTitle("Clear browsing data?").setMessage("Signs you out of sites in VoltFetch's browser and clears the recent sites list.")
                 .setPositiveButton("Clear") { _, _ ->
@@ -259,7 +325,8 @@ class BrowserActivity : Activity() {
 
     private fun blocked(url: String) = NoCapture.blocked(url) || NoCapture.blocked(pageUrl)
 
-    private fun isYouTubeUrl(raw: String): Boolean = com.voltfetch.engine.YouTube.isUrl(raw)
+    /** Pages from sites the media engine knows (YouTube, Instagram, Facebook, X, Vimeo…) open in the Media downloader. */
+    private fun isYouTubeUrl(raw: String): Boolean = com.voltfetch.engine.MediaSites.isKnown(raw) && !Links.looksLikeFile(raw)
 
     private fun consider(url: String) {
         if (!url.startsWith("http")) return
@@ -402,6 +469,8 @@ class BrowserActivity : Activity() {
             progress.animate().alpha(0f).setDuration(300).start()
             pageTitle = view.title ?: ""
             remember(url)
+            // reopened at this page if the app is restarted
+            if (url.startsWith("http") && home.visibility != View.VISIBLE) session.edit().putString("lastUrl", url).apply()
             // also look at <video>/<audio> elements that point straight at files
             view.evaluateJavascript("(function(){var o=[];document.querySelectorAll('video,audio,source').forEach(function(e){var s=e.currentSrc||e.src;if(s)o.push(s)});return o.join('\\n')})()") { res ->
                 val txt = res?.trim('"')?.replace("\\n", "\n") ?: return@evaluateJavascript
@@ -442,4 +511,8 @@ class BrowserActivity : Activity() {
     override fun onPause() { super.onPause(); web.onPause(); CookieManager.getInstance().flush() }
     override fun onResume() { super.onResume(); web.onResume() }
     override fun onDestroy() { (web.parent as? android.view.ViewGroup)?.removeView(web); web.destroy(); super.onDestroy() }
+
+    companion object {
+        const val DESKTOP_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    }
 }

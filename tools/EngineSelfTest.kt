@@ -45,6 +45,7 @@ class MemStore : Store {
 val data = Random(7).nextBytes(6 * 1024 * 1024 + 123)
 val pdfData = "%PDF-1.7\n".toByteArray() + Random(9).nextBytes(700 * 1024)
 val hits = AtomicInteger()
+val busyHits = java.util.concurrent.ConcurrentHashMap<String, Int>()
 var throttleMs = 0L
 
 fun server(): HttpServer {
@@ -66,6 +67,7 @@ fun server(): HttpServer {
             }
             if (path.startsWith("/auth") && ex.requestHeaders.getFirst("Authorization") != "Basic " + java.util.Base64.getEncoder().encodeToString("amit:pw".toByteArray())) { ex.sendResponseHeaders(401, -1); ex.close(); return@createContext }
             if (path.startsWith("/cookie") && ex.requestHeaders.getFirst("Cookie") != "sid=42") { ex.sendResponseHeaders(403, -1); ex.close(); return@createContext }
+            if (path.startsWith("/busy/") && busyHits.merge(path, 1, Int::plus)!! <= 2) { ex.sendResponseHeaders(503, -1); ex.close(); return@createContext }
             if (path.startsWith("/redirect")) { ex.responseHeaders.add("Location", "/file.zip"); ex.sendResponseHeaders(302, -1); ex.close(); return@createContext }
             if (path.startsWith("/named")) ex.responseHeaders.add("Content-Disposition", "attachment; filename*=UTF-8''Report%202026.pdf")
             if (path.startsWith("/dl/")) ex.responseHeaders.add("Content-Disposition", "attachment; filename=\"Annual Report.pdf\"")
@@ -197,17 +199,40 @@ fun mediaTests(base: String, port: Int) {
     check("audio: download then convert", sa.map { it.percent }.zipWithNext().all { (a, b) -> b >= a } && sa.any { it.stage == "Converting to MP3" } && sa.last().stage == "Adding cover art", sa.toString())
     check("resumed stream counts as done", MediaProgressTracker("youtube_video").let { t -> t.feed("[download] /w/a.f137.mp4 has already been downloaded"); t.feed("[download] Destination: /w/a.f140.m4a")!!.percent == 85.0 })
     check("eta formats", MediaProgressTracker.seconds("01:02:03") == 3723.0 && MediaProgressTracker.seconds("Unknown") == -1.0)
+    check("title read from the engine's file name", MediaProgressTracker("youtube_audio").feed("[download] Destination: /w/My Song [dQw4w9WgXcQ].f251.webm")!!.title == "My Song")
 
     // queue integration
-    var bad = runCatching { e.addMediaTask("https://example.com/v", "x", "youtube_video", 720) }.isFailure
-    check("media task rejects non-YouTube address", bad)
+    var bad = runCatching { e.addMediaTask("ftp://example.com/v", "x", "youtube_video", 720) }.isFailure && runCatching { e.addMediaTask("not a link", "x", "youtube_video", 720) }.isFailure
+    check("media task needs a web address", bad)
+    check("original audio must not carry a bitrate", runCatching { e.addMediaTask("https://youtu.be/dQw4w9WgXcQ", "x", MediaKinds.AUDIO, 192, start = false) }.isFailure)
     var d = e.addMediaTask("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "My: video?", "youtube_video", 1080, subs = "en", playlist = "Mix")
     var v = waitFor(e, d.id, Status.COMPLETE)
     check("media task completes", v.status == Status.COMPLETE && v.percent == 100.0 && v.name == "Real Title [abc].mp4", "${v.status} ${v.error} ${v.name}")
     check("media task carries options", fake.lastTask?.subs == "en" && fake.lastTask?.option == 1080 && v.note.contains("subtitles") && v.note.contains("Mix"), v.note)
     check("media traffic goes through the local proxy", fake.lastProxy?.startsWith("http://127.0.0.1:") == true, "${fake.lastProxy}")
     check("media runtime stage cleared at the end", v.taskStage == "" && v.speed == 0.0)
-    check("media address change only takes YouTube", !e.updateUrl(d.id, "https://example.com/x") && e.updateUrl(d.id, "https://youtu.be/dQw4w9WgXcQ"))
+    check("media address change only takes web pages", !e.updateUrl(d.id, "ftp://example.com/x") && e.updateUrl(d.id, "https://vimeo.com/76979871"))
+
+    // other sites, original audio, SponsorBlock, clips, browser login
+    check("sites: known ones named", MediaSites.site("https://www.instagram.com/reel/abc/") == "Instagram" && MediaSites.site("https://x.com/a/status/1") == "X" && MediaSites.site("https://m.facebook.com/watch?v=1") == "Facebook" && MediaSites.site("https://vimeo.com/1") == "Vimeo" && MediaSites.site("https://example.com/v") == null)
+    check("sites: any web page can be tried", MediaSites.isWeb("https://example.com/v") && !MediaSites.isWeb("ftp://x.com/a") && MediaSites.label("https://www.example.com/v") == "example.com")
+    check("sites: known link preferred in shared text", MediaSites.find("see https://example.com/a and https://www.instagram.com/reel/xyz/") == "https://www.instagram.com/reel/xyz/" && MediaSites.find("vimeo.com/76979871") == "https://vimeo.com/76979871")
+    check("clock parsing", MediaOpts.parseClock("1:20") == 80 && MediaOpts.parseClock("01:02:03") == 3723 && MediaOpts.parseClock("95") == 95 && MediaOpts.parseClock("1:75") == null && MediaOpts.parseClock("abc") == null && MediaOpts.clock(3723) == "1:02:03")
+    val ig = e.addMediaTask("https://www.instagram.com/reel/abc/", "Reel", MediaKinds.AUDIO, 0, start = false, opts = mapOf("sb" to "1", "ck" to "1", "junk" to "x"), thumb = "https://img.example/t.jpg")
+    check("non-YouTube task drops SponsorBlock, keeps login", ig.taskOpts == "ck=1" && ig.name == "Reel.m4a" && ig.category == "Music" && ig.note.startsWith("Instagram · original audio"), "${ig.taskOpts} ${ig.name} ${ig.note}")
+    val cl = e.addMediaTask("https://youtu.be/dQw4w9WgXcQ", "Song", MediaKinds.MP3, 192, start = false, opts = mapOf("sb" to "1", "from" to "80", "to" to "165"))
+    check("clip and SponsorBlock stored", MediaOpts.clip(MediaOpts.parse(cl.taskOpts)) == (80 to 165) && cl.taskOpts.contains("sb=1") && cl.note.contains("clip 1:20–2:45") && cl.name == "Song (1.20-2.45).mp3", "${cl.taskOpts} ${cl.note} ${cl.name}")
+    val inv = e.addMediaTask("https://youtu.be/dQw4w9WgXcQ", "S", MediaKinds.MP3, 192, start = false, opts = mapOf("from" to "90", "to" to "30"))
+    check("invalid clip ignored", inv.taskOpts == "")
+    e.save()
+    val again = Engine(FileStorage(dir), store).view(cl.id)!!
+    check("media options and thumbnail survive restart", again.taskOpts == cl.taskOpts && e.view(ig.id)!!.thumb == "https://img.example/t.jpg")
+    e.remove(listOf(ig.id, cl.id, inv.id), false)
+    val tc = MediaProgressTracker(MediaKinds.VIDEO, clipSeconds = 100.0); val sc = ArrayList<MediaProgress>()
+    for (l in listOf("[SponsorBlock] Fetching SponsorBlock segments", "[download] Destination: a.f137.mp4", "frame=  10 fps=0.0 q=-1.0 size=    1024KiB time=00:00:50.00 bitrate=N/A speed=2x",
+            "[download] Destination: a.f140.m4a", "size=     256KiB time=00:01:40.00 bitrate=N/A", "[Merger] Merging formats into \"a.mp4\"", "[ModifyChapters] Removing chapters")) tc.feed(l)?.let { sc.add(it) }
+    check("clip progress from FFmpeg time", sc.any { it.stage == "Downloading video (clip)" && Math.abs(it.percent - 42.5) < 0.01 }, sc.toString())
+    check("SponsorBlock stages reported", sc.first().stage == "Checking SponsorBlock" && sc.last().stage == "Cutting out sponsor parts" && sc.map { it.percent }.zipWithNext().all { (a, b) -> b >= a })
 
     fake.mode = "block"
     d = e.addMediaTask("https://youtu.be/dQw4w9WgXcQ", "Long one", "youtube_audio", 320)
@@ -216,6 +241,11 @@ fun mediaTests(base: String, port: Int) {
     v = e.view(d.id)!!
     check("media stage and progress shown while running", v.active && v.taskStage == "Merging video and audio" && v.percent > 0, "${v.status} ${v.taskStage} ${v.percent}")
     val proxyUrl = fake.lastProxy!!
+    val qs = e.addMediaTask("https://youtu.be/dQw4w9WgXcQ", "YouTube media", "youtube_video", 720, autoTitle = true)
+    until = System.currentTimeMillis() + 5000
+    while (System.currentTimeMillis() < until && e.view(qs.id)!!.taskStage != "Merging video and audio") Thread.sleep(20)
+    check("quick save takes the real title", e.view(qs.id)!!.name == "a.mp4", e.view(qs.id)!!.name)
+    e.remove(listOf(qs.id), false)
     val hooksBefore = fake.cancelHooks.get()
     e.pause(listOf(d.id))
     v = waitFor(e, d.id, Status.PAUSED, 5000)
@@ -388,6 +418,7 @@ fun main(args: Array<String>) {
     check("queue limit 1", e.view(n2)!!.active && !e.view(n1)!!.active, "${e.view(n1)!!.status} ${e.view(n2)!!.status}")
     waitFor(e, n1, Status.COMPLETE, 60000)
     check("queue runs to the end", e.view(n1)!!.status == Status.COMPLETE && e.view(n2)!!.status == Status.COMPLETE)
+    run { val t = System.currentTimeMillis() + 3000; while (e.queueRunning("Night") && System.currentTimeMillis() < t) Thread.sleep(20) }
     check("queue stops when empty", !e.queueRunning("Night"))
     val n3 = e.add(Engine.AddRequest("$base/n3.zip", queue = "Night", start = false)).id
     e.resume(listOf(n3))
@@ -432,12 +463,31 @@ fun main(args: Array<String>) {
     check("grabber all links", e.grab("$base/page.html", emptySet()).size == 3)
     d = e.add(Engine.AddRequest("$base/auth/x.zip"))
     check("login needed is explained", waitFor(e, d.id, Status.ERROR).error.contains("login"), e.view(d.id)!!.error)
+    check("a login error is not retried automatically", e.view(d.id)!!.retryAt == 0L)
     e.setLogin(d.id, "amit:pw"); e.resume(listOf(d.id))
     check("download with login", waitFor(e, d.id, Status.COMPLETE).status == Status.COMPLETE, e.view(d.id)!!.error)
     d = e.add(Engine.AddRequest("$base/cookie/c.zip", cookies = "sid=42"))
     check("download with browser cookies", waitFor(e, d.id, Status.COMPLETE).status == Status.COMPLETE, e.view(d.id)!!.error)
     check("rename finished file", e.rename(d.id, "renamed.zip") && e.view(d.id)!!.name == "renamed.zip" && File(dir, "renamed.zip.part").exists())
     check("youtube capture blocked", NoCapture.blocked("https://m.youtube.com/watch?v=1") && NoCapture.blocked("https://rr1.googlevideo.com/x") && !NoCapture.blocked("https://example.com/v.mp4"))
+
+    // 12b. automatic retry of network failures
+    e.retryDelays = listOf(300L, 300L, 300L)
+    val events = java.util.concurrent.CopyOnWriteArrayList<String>()
+    e.onEvent { ev -> events.add(ev.kind) }
+    d = e.add(Engine.AddRequest("$base/busy/a.zip"))
+    run { val t = System.currentTimeMillis() + 20000; while (e.view(d.id)!!.status != Status.COMPLETE && System.currentTimeMillis() < t) Thread.sleep(50) }
+    v = e.view(d.id)!!
+    check("busy server: retried automatically until it worked", v.status == Status.COMPLETE && sha(fileOf(v).readBytes()) == sha(data), "${v.status} ${v.error}")
+    check("no failure alert while a retry is pending", events.contains("retrying") && !events.contains("error"), events.toString())
+    e.retryDelays = listOf(60_000L)
+    d = e.add(Engine.AddRequest("http://127.0.0.1:1/x.zip"))
+    v = waitFor(e, d.id, Status.ERROR)
+    check("connection failure schedules a retry", v.status == Status.ERROR && v.retryAt > System.currentTimeMillis(), "${v.status} ${v.retryAt}")
+    e.pause(listOf(d.id))
+    check("pausing cancels the automatic retry", e.view(d.id)!!.retryAt == 0L)
+    e.remove(listOf(d.id), false)
+    e.retryDelays = listOf(30_000L, 120_000L, 300_000L)
 
     // 13. file names
     check("generic: id", Names.isGeneric("8f3a9c2e7b1d4f6a.bin") && Names.isGeneric("aZ3kP9qW2xL7mN4v") && Names.isGeneric("downloadfile.bin") && Names.isGeneric("1698765432"))

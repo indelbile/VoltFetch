@@ -28,7 +28,7 @@ import com.voltfetch.engine.MAIN_QUEUE
 import com.voltfetch.engine.Names
 import com.voltfetch.engine.NoCapture
 import com.voltfetch.engine.Probe
-import com.voltfetch.engine.YouTube
+import com.voltfetch.engine.MediaSites
 
 /** The "New download" sheet. Also receives links shared from browsers, other apps and VoltFetch's own browser. */
 class AddActivity : Activity() {
@@ -163,6 +163,25 @@ class AddActivity : Activity() {
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIntent(intent) }
 
+    private var clipTried = false
+
+    /**
+     * Android only lets the app in front read the clipboard. Opened from the home-screen "Paste link"
+     * shortcut, the sheet isn't in front yet in onCreate, so the copied link is picked up here instead.
+     */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus || clipTried) return
+        clipTried = true
+        if (urlIn.text.toString().isNotBlank() || intent?.action == Intent.ACTION_SEND) return
+        val clip = runCatching { getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(this)?.toString() }.getOrNull()
+        val links = Links.find(clip)
+        if (links.isEmpty()) { if (intent?.action == Intent.ACTION_MAIN) toast("Copy a link first, then use Paste link"); return }
+        if (links.size == 1 && MediaSites.isKnown(links[0]) && !Links.looksLikeFile(links[0])) { openMedia(links[0]); return }
+        urlIn.setText(links.joinToString("\n"))
+        urlIn.setSelection(urlIn.text.length)
+    }
+
     private fun toggleMore() {
         val show = more.visibility != View.VISIBLE
         more.visibility = if (show) View.VISIBLE else View.GONE
@@ -191,8 +210,9 @@ class AddActivity : Activity() {
             val clip = runCatching { getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(this)?.toString() }.getOrNull()
             links = Links.find(clip)
         }
-        // A single YouTube page goes straight to the Media downloader, which handles quality, MP3 and playlists.
-        if (links.size == 1 && YouTube.isUrl(links[0]) && (i?.action == Intent.ACTION_SEND || i?.action == Intent.ACTION_VIEW)) {
+        // A single video page from a known site (YouTube, Instagram, Facebook, X, Vimeo…) goes straight to the
+        // Media downloader, which handles quality, audio, clips and playlists.
+        if (links.size == 1 && MediaSites.isKnown(links[0]) && !Links.looksLikeFile(links[0]) && (i?.action == Intent.ACTION_SEND || i?.action == Intent.ACTION_VIEW)) {
             openMedia(links[0]); return
         }
         if (links.isNotEmpty()) urlIn.setText(links.joinToString("\n"))
@@ -244,9 +264,9 @@ class AddActivity : Activity() {
         (fileCard?.parent as? android.view.ViewGroup)?.removeView(fileCard)
         card.removeAllViews()
         if (blocked) {
-            val yt = list.firstOrNull { YouTube.isUrl(it) }
+            val yt = list.firstOrNull { MediaSites.isKnown(it) }
             if (yt != null) {
-                card.addView(notice("YouTube links are downloaded with the Media downloader, where you choose the quality or MP3. Add them one link at a time.", false))
+                card.addView(notice("${MediaSites.label(yt)} links are downloaded with the Media downloader, where you choose the quality or audio. Add them one link at a time.", false))
                 card.addView(k.button("Open Media downloader", "primary", R.drawable.ic_film) { openMedia(yt) }, lp(-1, dp(48)))
             } else card.addView(notice("This site's video streams can't be saved directly. Open the video's page in the Media downloader instead.", true))
             return
@@ -277,6 +297,11 @@ class AddActivity : Activity() {
         val size = probe?.size?.takeIf { it > 0 } ?: hintSize.takeIf { it > 0 }
         sizeText.text = size?.let { Fmt.size(it) } ?: "—"
         if (needsLogin && more.visibility != View.VISIBLE) toggleMore()
+        // a web page rather than a file: the Media downloader can usually pull the video out of it
+        if (probe?.mime == "text/html" || (probe == null && MediaSites.isKnown(url))) {
+            card.addView(notice("This link is a web page, not a file. If it has a video or audio on it, the Media downloader can probably save it.", false))
+            card.addView(k.button("Open in Media downloader", "tonal", R.drawable.ic_film) { openMedia(url) }, lp(-1, dp(46)))
+        }
         engine.views().firstOrNull { it.url == url && it.status != com.voltfetch.engine.Status.COMPLETE }?.let {
             card.addView(notice("This link is already in your list as \"${it.name}\". Adding it again downloads a second copy.", true))
         }

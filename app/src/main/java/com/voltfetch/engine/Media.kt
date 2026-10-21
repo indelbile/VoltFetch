@@ -65,33 +65,136 @@ object YouTube {
     fun playlistUrl(id: String) = "https://www.youtube.com/playlist?list=$id"
 }
 
+/**
+ * Sites the media engine (yt-dlp) handles well. Any http(s) page can be tried; this list decides where a
+ * shared link is sent and how a site is named in notes. yt-dlp itself supports well over a thousand sites.
+ */
+object MediaSites {
+    private val known = linkedMapOf(
+        "youtube.com" to "YouTube", "youtu.be" to "YouTube", "youtube-nocookie.com" to "YouTube",
+        "instagram.com" to "Instagram", "facebook.com" to "Facebook", "fb.watch" to "Facebook", "fb.com" to "Facebook",
+        "x.com" to "X", "twitter.com" to "X", "vimeo.com" to "Vimeo", "dailymotion.com" to "Dailymotion", "dai.ly" to "Dailymotion",
+        "reddit.com" to "Reddit", "redd.it" to "Reddit", "soundcloud.com" to "SoundCloud", "tiktok.com" to "TikTok",
+        "twitch.tv" to "Twitch", "bilibili.com" to "Bilibili", "vk.com" to "VK", "pinterest.com" to "Pinterest", "pin.it" to "Pinterest",
+        "threads.net" to "Threads", "linkedin.com" to "LinkedIn", "streamable.com" to "Streamable", "bandcamp.com" to "Bandcamp",
+        "mixcloud.com" to "Mixcloud", "ted.com" to "TED", "rumble.com" to "Rumble", "odysee.com" to "Odysee", "9gag.com" to "9GAG",
+        "imgur.com" to "Imgur", "tumblr.com" to "Tumblr", "loom.com" to "Loom", "kick.com" to "Kick", "snapchat.com" to "Snapchat",
+    )
+
+    private fun host(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val u = runCatching { URI(url.trim()) }.getOrNull() ?: return null
+        val scheme = u.scheme?.lowercase(Locale.ROOT)
+        if (scheme != "http" && scheme != "https") return null
+        return u.host?.lowercase(Locale.ROOT)?.takeIf { it.isNotEmpty() }
+    }
+
+    /** Any http(s) page with a host: something the media engine can at least try. */
+    fun isWeb(url: String?): Boolean = host(url) != null
+
+    /** "Instagram", "YouTube"… for known sites, else null. */
+    fun site(url: String?): String? {
+        val h = host(url) ?: return null
+        return known.entries.firstOrNull { (d, _) -> h == d || h.endsWith(".$d") }?.value
+    }
+
+    fun isKnown(url: String?) = site(url) != null
+
+    /** A short name for notes: the known site name, or the bare host. */
+    fun label(url: String?): String = site(url) ?: host(url)?.removePrefix("www.")?.removePrefix("m.") ?: "Web"
+
+    /** The best media link in shared or typed text: a known site first, then any web link; adds https:// when typed without it. */
+    fun find(text: String?): String? {
+        if (text.isNullOrBlank()) return null
+        val links = Links.find(text)
+        links.firstOrNull { isKnown(it) }?.let { return it }
+        links.firstOrNull()?.let { return it }
+        val t = text.trim()
+        return if (!t.contains("://") && !t.contains(' ') && t.contains('.') && isWeb("https://$t")) "https://$t" else null
+    }
+}
+
+/** Kinds of media task. The first two keep their original names so lists saved by earlier versions still load. */
+object MediaKinds {
+    const val VIDEO = "youtube_video"
+    const val MP3 = "youtube_audio"
+    /** The site's own audio track (usually AAC in .m4a), copied without re-encoding. */
+    const val AUDIO = "media_audio"
+    val all = setOf(VIDEO, MP3, AUDIO)
+    fun isAudio(kind: String) = kind == MP3 || kind == AUDIO
+}
+
+/**
+ * Extra per-task choices, stored as "key=value;key=value":
+ * sb=1 cut sponsor/non-music parts (SponsorBlock, YouTube only) · from/to = clip in seconds ·
+ * ck=1 use the login (cookies) from VoltFetch's browser.
+ */
+object MediaOpts {
+    val keys = setOf("sb", "from", "to", "ck")
+
+    fun parse(s: String?): Map<String, String> = (s ?: "").split(';').mapNotNull { p ->
+        val k = p.substringBefore('=', "").trim()
+        if (k.isEmpty()) null else k to p.substringAfter('=', "").trim()
+    }.toMap()
+
+    fun encode(m: Map<String, String>): String =
+        m.filter { it.key in keys && it.value.isNotBlank() }.entries.sortedBy { it.key }.joinToString(";") { "${it.key}=${it.value}" }
+
+    /** (from, to) in whole seconds when a valid clip is set. */
+    fun clip(m: Map<String, String>): Pair<Int, Int>? {
+        val a = m["from"]?.toIntOrNull() ?: return null
+        val b = m["to"]?.toIntOrNull() ?: return null
+        return if (a >= 0 && b > a) a to b else null
+    }
+
+    /** "80" → "1:20", "3723" → "1:02:03". */
+    fun clock(sec: Int): String {
+        val h = sec / 3600; val m = (sec % 3600) / 60; val s = sec % 60
+        return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, s) else String.format(Locale.US, "%d:%02d", m, s)
+    }
+
+    /** "1:20", "01:02:03" or "80" → seconds; null if it isn't a time. */
+    fun parseClock(text: String?): Int? {
+        val t = text?.trim().orEmpty()
+        if (t.isEmpty() || !t.matches(Regex("\\d{1,3}(:\\d{1,2}){0,2}"))) return null
+        val parts = t.split(':').map { it.toInt() }
+        if (parts.drop(1).any { it >= 60 }) return null
+        return parts.fold(0) { acc, x -> acc * 60 + x }
+    }
+}
+
 /** What an embedded media job needs; a plain snapshot, so the handler never touches engine state. */
 data class MediaTask(
     val id: Long, val url: String, val kind: String, val option: Int,
     /** Subtitle languages to fetch and embed ("" = none), e.g. "en" or "en,hi". */
     val subs: String,
     val category: String, val name: String,
+    /** Extra choices, see [MediaOpts]. */
+    val opts: Map<String, String> = emptyMap(),
 )
 
 /** Services the engine lends to a media job. proxyUrl routes traffic through the shared speed limit and the user's proxy. */
 class MediaEnv(val proxyUrl: String?)
 
 /** One progress report: overall percent across every stage, what is happening, and current speed/ETA. */
-data class MediaProgress(val percent: Double, val stage: String, val speed: Double, val eta: Double)
+data class MediaProgress(val percent: Double, val stage: String, val speed: Double, val eta: Double, val title: String = "")
 
 /**
  * Turns yt-dlp's console output into one steadily rising percentage. yt-dlp reports 0–100% for each
  * stream separately (video, then audio) and is silent while merging or converting, so the bar would
  * otherwise jump back and stall at 100%.
  */
-class MediaProgressTracker(private val kind: String) {
-    private val video = kind == "youtube_video"
+class MediaProgressTracker(private val kind: String, private val clipSeconds: Double = 0.0) {
+    private val video = kind == MediaKinds.VIDEO
+    // FFmpeg (used for clips) reports "time=00:00:12.34" instead of a percentage
+    private val ffTimeRe = Regex("""time=(\d+):(\d+):(\d+(?:\.\d+)?)""")
     private var streams = 0
     private var currentIsMedia = false
     private var overall = 0.0
     private var stage = "Starting"
     private var speed = 0.0
     private var eta = -1.0
+    private var title = ""
 
     private val progressRe = Regex(
         """^\[download]\s+([\d.]+)%(?:\s+of\s+~?\s*([\d.]+)\s*([KMGT]?i?B))?(?:\s+in\s+\S+)?(?:\s+at\s+(?:([\d.]+)\s*([KMGT]?i?B)/s|Unknown(?:\s+B/s|\s+speed)?))?(?:\s+ETA\s+(\S+))?"""
@@ -110,7 +213,11 @@ class MediaProgressTracker(private val kind: String) {
         return snapshot()
     }
 
-    private fun snapshot() = MediaProgress(overall, stage, speed, eta)
+    private fun snapshot() = MediaProgress(overall, stage, speed, eta, title)
+
+    /** "/w/My Song [dQw4w9WgXcQ].f140.m4a" → "My Song". */
+    private fun titleOf(file: String): String = file.substringAfterLast('/').substringBeforeLast('.')
+        .replace(Regex("\\.f[^.\\s]+$"), "").replace(Regex("\\s*\\[[^\\]]+]$"), "").trim()
 
     fun feed(raw: String): MediaProgress? {
         val line = raw.trim()
@@ -122,7 +229,9 @@ class MediaProgressTracker(private val kind: String) {
             currentIsMedia = ext !in sideExt
             if (!currentIsMedia) { stage = if (ext in setOf("webp", "jpg", "jpeg", "png")) "Fetching cover art" else "Fetching subtitles"; speed = 0.0; eta = -1.0; return snapshot() }
             streams++
+            if (title.isEmpty()) title = titleOf(file)
             stage = when { !video -> "Downloading audio"; streams == 1 -> "Downloading video"; else -> "Downloading audio track" }
+            if (clipSeconds > 0) stage += " (clip)"
             if (line.endsWith("has already been downloaded")) overall = maxOf(overall, span().second)
             return snapshot()
         }
@@ -136,15 +245,25 @@ class MediaProgressTracker(private val kind: String) {
             overall = maxOf(overall, a + (b - a) * pct / 100.0)
             return snapshot()
         }
+        if (clipSeconds > 0 && currentIsMedia) ffTimeRe.find(line)?.let { m ->
+            val t = m.groupValues[1].toDouble() * 3600 + m.groupValues[2].toDouble() * 60 + m.groupValues[3].toDouble()
+            val pct = (t / clipSeconds * 100).coerceIn(0.0, 100.0)
+            speed = 0.0; eta = -1.0
+            val (a, b) = span()
+            overall = maxOf(overall, a + (b - a) * pct / 100.0)
+            return snapshot()
+        }
         return when {
             line.startsWith("[Merger]") -> post("Merging video and audio", 94.0)
-            line.startsWith("[ExtractAudio]") -> post("Converting to MP3", 91.0)
+            line.startsWith("[ExtractAudio]") -> post(if (kind == MediaKinds.MP3) "Converting to MP3" else "Extracting audio", 91.0)
+            line.startsWith("[SponsorBlock]") -> { stage = "Checking SponsorBlock"; speed = 0.0; eta = -1.0; snapshot() }
+            line.startsWith("[ModifyChapters]") -> post("Cutting out sponsor parts", 95.5)
             line.startsWith("[VideoRemuxer]") || line.startsWith("[VideoConvertor]") -> post("Converting", 95.0)
             line.startsWith("[Fixup") -> post("Finishing", 95.0)
             line.startsWith("[EmbedSubtitle]") -> post("Embedding subtitles", 96.0)
             line.startsWith("[ThumbnailsConvertor]") || line.startsWith("[EmbedThumbnail]") -> post("Adding cover art", 97.0)
             line.startsWith("[Metadata]") -> post("Writing tags", 98.0)
-            line.startsWith("[youtube") || line.startsWith("[info]") -> { if (streams == 0) { stage = "Preparing"; snapshot() } else null }
+            line.startsWith("[") && !line.startsWith("[download]") && streams == 0 -> { stage = "Preparing"; snapshot() }
             else -> null
         }
     }

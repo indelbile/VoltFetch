@@ -37,8 +37,23 @@ class ScheduleReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED, AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED -> {
-                Schedules.reschedule(ctx); return
+                Schedules.reschedule(ctx); runCatching { PlaylistSync.schedule(ctx) }; return
             }
+        }
+        if (PlaylistSync.isSyncIntent(intent)) {
+            // nightly playlist check: in the foreground service when Android allows it (no time limit),
+            // otherwise briefly in the background; then tomorrow's alarm is set
+            val viaService = runCatching { ctx.startForegroundService(Intent(ctx, DownloadService::class.java).setAction(DownloadService.ACTION_SYNC)) }.isSuccess
+            if (viaService) return
+            val pending = goAsync()
+            val app = ctx.applicationContext
+            Thread({
+                try { runCatching { PlaylistSync.syncAll(app) } } finally {
+                    runCatching { PlaylistSync.schedule(app) }
+                    pending.finish()
+                }
+            }, "voltfetch-sync").start()
+            return
         }
         val engine = VoltApp.engine(ctx)
         val at = intent.getLongExtra("at", 0L).takeIf { it > 0 } ?: System.currentTimeMillis()

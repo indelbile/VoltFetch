@@ -1,3 +1,31 @@
+# Changes, round 5: browser that stays open
+
+- **Home button** in the browser's top bar returns to the main screen; the browser stays open behind it (page, history, scroll position). The main screen's **Browser** button brings it back exactly where you left it.
+- **Back on the first page** (or a **long-press on Back**) also returns to the main screen and keeps the page. **Close browser** in the menu ends the session; **Start page** shows the browser's start page.
+- **Restored if closed:** if Android closes the browser in the background, the page and its history come back; after an app restart the last page reopens.
+- **Desktop site** toggle and **Share page** in the browser menu.
+- **Back on the main screen** sends VoltFetch to the background instead of closing it, so a minimised browser isn't lost.
+
+# Changes, round 4: convenience
+
+- **Share menu "Save video" / "Save audio":** queues the link at once with your last-used choices (quality, MP3 or original audio, subtitles, SponsorBlock, browser login). No screen opens; the real title replaces the placeholder name once the download starts.
+- **Automatic retry:** downloads that fail because of the network retry by themselves after 30 s, 2 min and 5 min, and immediately when the connection comes back. No failure alert while a retry is pending; the list shows "Connection problem · retrying by itself". Pausing cancels it.
+- **Media downloader:** a pasted link is checked automatically; opening it with a video link on the clipboard fills it in; the last quality, MP3 bitrate and audio type are remembered (also used for playlists).
+- **Home-screen shortcuts** (long-press the icon): Paste link, Media downloader, Browser.
+- **Share button** on "Download complete" notifications.
+
+# Changes, round 3: more sites and media options
+
+- **Many more sites:** the Media downloader accepts links from Instagram, Facebook, X, Vimeo, Reddit, SoundCloud, TikTok, Dailymotion and any other site yt-dlp supports. Shared and copied links from known sites open it directly; a web page added to the normal downloader offers it too.
+- **Browser login:** optionally uses the sign-in from VoltFetch's Browser tab for sites that need one. Only that site's cookies are used, via a temporary file.
+- **Original audio:** keeps the site's own track without re-encoding (usually M4A).
+- **SponsorBlock (YouTube):** optionally cuts sponsor, self-promotion, "subscribe" and non-music parts.
+- **Clips:** download only from a start time to an end time.
+- **Playlist sync:** follow a playlist (or "Keep in sync" while downloading it); new videos are queued every night at 3:00. Manage it in Settings › Followed playlists.
+- **Clipboard:** a copied video link from a known site offers the Media downloader.
+- **Thumbnails** in the download list and notifications. Each active download has its own notification with a **Pause** button.
+- **Fixed:** the local proxy listens on 127.0.0.1 (Android's loopback default is IPv6), which caused "Connection refused". Wrong "needs an account" hint fixed; widescreen qualities labelled 4K/2K/Full HD; phone-only APKs.
+
 # Changes: media queue fixes and improvements
 
 ## Build blockers fixed

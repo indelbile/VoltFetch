@@ -39,6 +39,9 @@ class VoltApp : Application() {
         // The on-device media engine (yt-dlp + FFmpeg) unpacks on first run, so it starts in the background
         // instead of holding up launch; media jobs wait for it and report a readable error if it fails.
         MediaEngine.start(this)
+        // followed playlists: keep the nightly alarm set, and catch up if last night's check was missed
+        runCatching { PlaylistSync.schedule(this); PlaylistSync.catchUp(this) }
+        runCatching { Thumbs.prune(this, engine.views().filter { it.thumb.isNotEmpty() }.map { it.id }.toSet()) }
         runCatching { Schedules.reschedule(this) }
         // keep the foreground service running whenever something is downloading
         main.post(object : Runnable {
@@ -88,7 +91,10 @@ class VoltApp : Application() {
     }
 
     private fun applyCaps(caps: NetworkCapabilities) {
+        val wasOnline = online
         online = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        // back online: retry downloads that failed because of the network straight away
+        if (online && !wasOnline && ::engine.isInitialized) runCatching { engine.retryTransient() }
         unmetered = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) ||
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
         refreshNetworkGate()
@@ -115,15 +121,21 @@ class VoltApp : Application() {
             return
         }
         val v = engine.view(e.id) ?: return
+        if (e.kind == "complete" || e.kind == "error") nm.cancel(DownloadService.progressId(e.id))
         val details = PendingIntent.getActivity(this, e.id.toInt(), Intent(this, DetailActivity::class.java).putExtra("id", e.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val b = Notification.Builder(this, CH_DONE).setSmallIcon(R.drawable.ic_stat).setAutoCancel(true).setColor(0xFF1A8CFF.toInt())
         when (e.kind) {
             "complete" -> {
                 if (!s.notifyDone) return
                 b.setContentTitle(if (v.taskKind.isNotEmpty()) "Media download complete" else "Download complete").setContentText(v.name)
+                if (v.thumb.isNotEmpty()) Thumbs.cached(this, v.id)?.let { b.setLargeIcon(it) }
                 val open = Files.openIntent(this, v)
                 b.setContentIntent(if (open != null) PendingIntent.getActivity(this, 10_000 + e.id.toInt(), open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT) else details)
                 if (open != null) b.addAction(Notification.Action.Builder(null, "Open", PendingIntent.getActivity(this, 20_000 + e.id.toInt(), open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)).build())
+                runCatching {
+                    val share = Files.shareIntent(v).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    b.addAction(Notification.Action.Builder(null, "Share", PendingIntent.getActivity(this, 25_000 + e.id.toInt(), share, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)).build())
+                }
                 b.addAction(Notification.Action.Builder(null, "Details", details).build())
             }
             "error" -> {

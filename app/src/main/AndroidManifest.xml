@@ -36,6 +36,8 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- long-press shortcuts: Paste link, Media downloader, Browser -->
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity>
 
         <activity android:name="com.voltfetch.app.DetailActivity" android:exported="false" />
@@ -83,6 +85,40 @@
                 <data android:mimeType="audio/*" />
             </intent-filter>
         </activity>
+
+        <!-- Share-menu quick actions: "Save video" / "Save audio" queue the link at once with the last-used
+             choices, without opening a screen. One invisible activity, two labels. -->
+        <activity
+            android:name="com.voltfetch.app.QuickSaveActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="com.voltfetch.app.quick"
+            android:theme="@android:style/Theme.NoDisplay" />
+        <activity-alias
+            android:name="com.voltfetch.app.QuickSaveVideo"
+            android:targetActivity="com.voltfetch.app.QuickSaveActivity"
+            android:exported="true"
+            android:label="@string/quick_video"
+            android:icon="@mipmap/ic_launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name="com.voltfetch.app.QuickSaveAudio"
+            android:targetActivity="com.voltfetch.app.QuickSaveActivity"
+            android:exported="true"
+            android:label="@string/quick_audio"
+            android:icon="@mipmap/ic_launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity-alias>
 
         <receiver android:name="com.voltfetch.app.ScheduleReceiver" android:exported="false">
             <intent-filter>

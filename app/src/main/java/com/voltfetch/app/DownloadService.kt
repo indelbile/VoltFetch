@@ -14,14 +14,16 @@ import android.os.PowerManager
 import com.voltfetch.engine.Fmt
 
 /**
- * Keeps downloads alive while the app is in the background, with one ongoing
- * notification showing overall progress and a "Pause all" button.
+ * Keeps downloads alive while the app is in the background. Shows one summary notification (overall
+ * progress, "Pause all") and, grouped under it, one notification per active download with its thumbnail,
+ * progress and its own Pause button. Also runs the nightly playlist sync when started for it.
  */
 class DownloadService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var wake: PowerManager.WakeLock? = null
     private var wifi: WifiManager.WifiLock? = null
     private var idleTicks = 0
+    private val posted = HashSet<Long>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -49,6 +51,14 @@ class DownloadService : Service() {
                 engine.resume(listOf(it))
                 getSystemService(android.app.NotificationManager::class.java).cancel(VoltApp.NOTIFY_BASE + it.toInt())
             }
+            ACTION_PAUSE -> intent.getLongExtra("id", -1).takeIf { it > 0 }?.let { id ->
+                engine.pause(listOf(id))
+                getSystemService(android.app.NotificationManager::class.java).cancel(progressId(id))
+            }
+            ACTION_SYNC -> {
+                val app = applicationContext
+                Thread({ try { runCatching { PlaylistSync.syncAll(app) } } finally { runCatching { PlaylistSync.schedule(app) } } }, "voltfetch-sync").start()
+            }
         }
         return START_NOT_STICKY
     }
@@ -56,10 +66,12 @@ class DownloadService : Service() {
     private val tick = object : Runnable {
         override fun run() {
             val engine = VoltApp.engine(this@DownloadService)
-            if (engine.activeCount() == 0) {
+            if (engine.activeCount() == 0 && !PlaylistSync.running) {
                 if (++idleTicks >= 3) { stopSelf(); return }
             } else idleTicks = 0
-            getSystemService(android.app.NotificationManager::class.java).notify(NOTIFY_ID, build())
+            val nm = getSystemService(android.app.NotificationManager::class.java)
+            nm.notify(NOTIFY_ID, build())
+            postItems(nm)
             handler.postDelayed(this, 1000)
         }
     }
@@ -97,8 +109,39 @@ class DownloadService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(open)
+            .setGroup(GROUP).setGroupSummary(true)
             .addAction(Notification.Action.Builder(null, "Pause all", pause).build())
             .build()
+    }
+
+    /** One notification per active download, with its own Pause button; removed when it stops. */
+    private fun postItems(nm: android.app.NotificationManager) {
+        val active = VoltApp.engine(this).views().filter { it.active }
+        val now = HashSet<Long>()
+        for (v in active) {
+            now.add(v.id)
+            val pct = v.percent
+            val text = buildString {
+                if (pct >= 0) append("${pct.toInt()}%")
+                val stage = if (v.isMedia) v.taskStage else ""
+                val speed = Fmt.speed(v.speed)
+                for (part in listOf(stage, speed, if (v.etaSeconds > 0) Fmt.eta(v.etaSeconds) + " left" else "")) if (part.isNotEmpty()) { if (isNotEmpty()) append("  ·  "); append(part) }
+                if (isEmpty()) append("Connecting")
+            }
+            val detail = PendingIntent.getActivity(this, 60_000 + v.id.toInt(), Intent(this, DetailActivity::class.java).putExtra("id", v.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            val pause = PendingIntent.getForegroundService(this, 70_000 + v.id.toInt(), Intent(this, DownloadService::class.java).setAction(ACTION_PAUSE).putExtra("id", v.id), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            val b = Notification.Builder(this, VoltApp.CH_PROGRESS)
+                .setSmallIcon(R.drawable.ic_stat).setColor(0xFF1A8CFF.toInt())
+                .setContentTitle(v.name).setContentText(text)
+                .setProgress(100, pct.coerceAtLeast(0.0).toInt(), pct < 0)
+                .setOngoing(true).setOnlyAlertOnce(true).setContentIntent(detail)
+                .setGroup(GROUP).setSortKey("%08d".format(v.queuePos))
+                .addAction(Notification.Action.Builder(null, "Pause", pause).build())
+            if (v.thumb.isNotEmpty()) (Thumbs.cached(this, v.id) ?: Thumbs.get(this, v.id, v.thumb))?.let { b.setLargeIcon(it) }
+            nm.notify(progressId(v.id), b.build())
+        }
+        for (id in posted - now) nm.cancel(progressId(id))
+        posted.clear(); posted.addAll(now)
     }
 
     /**
@@ -121,6 +164,8 @@ class DownloadService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(tick)
+        runCatching { val nm = getSystemService(android.app.NotificationManager::class.java); for (id in posted) nm.cancel(progressId(id)) }
+        posted.clear()
         runCatching { wake?.release() }
         runCatching { wifi?.release() }
         super.onDestroy()
@@ -131,6 +176,11 @@ class DownloadService : Service() {
         const val ACTION_PAUSE_ALL = "com.voltfetch.PAUSE_ALL"
         const val ACTION_RESUME_ALL = "com.voltfetch.RESUME_ALL"
         const val ACTION_RETRY = "com.voltfetch.RETRY"
+        const val ACTION_PAUSE = "com.voltfetch.PAUSE"
+        const val ACTION_SYNC = "com.voltfetch.SYNC_PLAYLISTS"
+        private const val GROUP = "com.voltfetch.active"
+        /** Notification id of a download's progress notification (finished/failed ones use VoltApp.NOTIFY_BASE + id). */
+        fun progressId(id: Long) = 600_000 + id.toInt()
         @Volatile private var lastStart = 0L
 
         fun ensureRunning(ctx: Context, force: Boolean = false) {

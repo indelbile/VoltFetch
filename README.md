@@ -4,18 +4,24 @@ VoltFetch is a native Android download manager with queues, resumable multi-conn
 
 ## On-device media downloads
 
-The media downloader embeds yt-dlp and FFmpeg through Android libraries, so users do not need a PC, companion server, Python installation, Termux, or another downloader app.
+The media downloader embeds yt-dlp and FFmpeg, so no PC, server, Termux or other app is needed. It works with **YouTube, Instagram, Facebook, X, Vimeo, Reddit, SoundCloud, TikTok, Dailymotion** and the many other sites yt-dlp supports.
 
-- **Videos and Shorts:** pick a resolution. The best stream up to that height is chosen, preferring H.264 + AAC for compatibility and falling back to VP9/AV1 at 1440p and above. Video and audio are merged into MP4.
-- **MP3:** 128/192/256/320 kbps, with cover art and title/artist tags embedded.
-- **Subtitles (optional):** in the phone's language and English, embedded in the MP4. Auto-generated captions are used when there are no others. If subtitles, cover art or tags fail, the download is retried without them rather than failing.
-- **Playlists:** each video is added to the queue as its own item, at a chosen maximum quality or as MP3.
-- **Sharing:** sharing a YouTube link to VoltFetch opens the Media downloader.
+- **Videos:** pick a resolution; the best stream up to that height is chosen (H.264 + AAC preferred for compatibility), merged into MP4.
+- **Audio:** *Original audio* copies the site's own track without re-encoding (best quality, usually M4A), or MP3 at 128–320 kbps. Cover art and tags are embedded.
+- **Clips:** download only part of a video by giving a start and end time (e.g. 1:20 to 2:45).
+- **SponsorBlock (YouTube):** optionally cut sponsor segments, self-promotion, "subscribe" reminders and non-music parts.
+- **Subtitles (optional):** phone's language and English, embedded in the MP4.
+- **Browser login:** sites that only show videos to signed-in users use the login from VoltFetch's own Browser tab. Only that site's cookies are passed to yt-dlp, in a temporary file deleted right after.
+- **Playlists:** each item is queued separately. **Keep in sync / Follow** checks a playlist every night at 3:00 (and on the next app start if a night was missed) and queues new videos. Manage followed playlists in Settings.
+- **Sharing:** sharing a link from a known site opens the Media downloader; copying one offers it on the main screen. The share menu also has **Save video** and **Save audio**, which queue the link at once with your last-used choices.
+- **Automatic retry:** network failures are retried by themselves (30 s, 2 min, 5 min) and right away when the connection returns.
+- **Shortcuts:** long-press the app icon for Paste link, Media downloader and Browser.
+- **Browser stays open:** its Home button (or Back on the first page) returns to the main screen without closing the page; the Browser button brings it back where you left it. Close it from its menu.
 - Finished files are saved to `Download/VoltFetch/Video` or `Download/VoltFetch/Music`.
 
 ### Unified queue
 
-YouTube tasks go into the same persistent queue as regular downloads. They share the concurrency settings, pause/resume/retry/remove controls, history, foreground service and notifications. Progress runs as one steady bar across every stage (video, audio, merging, converting), with the current stage, real speed and time left. Pausing stops the yt-dlp process; resuming continues from its partial files. Removing a task deletes its temporary files, and leftovers are cleaned at start-up.
+YouTube tasks go into the same persistent queue as regular downloads. They share the concurrency settings, pause/resume/retry/remove controls, history, foreground service and notifications. Progress runs as one steady bar across every stage (video, audio, merging, converting), with the current stage, real speed and time left. Media downloads show their thumbnail in the list, and every active download gets its own notification with a Pause button. Pausing stops the yt-dlp process; resuming continues from its partial files. Removing a task deletes its temporary files, and leftovers are cleaned at start-up.
 
 yt-dlp's traffic goes through a small local proxy inside the app. This means the global speed limit and speed schedule apply to media downloads together with regular ones (changes take effect immediately), and the user's HTTP proxy setting is honoured.
 
