@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: settings are backed up; the download list (with encrypted logins and cookies),
+     temporary media files and crash logs are not. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="downloads.json" />
+        <exclude domain="file" path="downloads.json.tmp" />
+        <exclude domain="file" path="media-work/" />
+        <exclude domain="file" path="crash.txt" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="downloads.json" />
+        <exclude domain="file" path="downloads.json.tmp" />
+        <exclude domain="file" path="media-work/" />
+        <exclude domain="file" path="crash.txt" />
+    </device-transfer>
+</data-extraction-rules>

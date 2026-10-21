@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 10-11: same rules as data_extraction_rules.xml. -->
+<full-backup-content>
+    <exclude domain="file" path="downloads.json" />
+    <exclude domain="file" path="downloads.json.tmp" />
+    <exclude domain="file" path="media-work/" />
+    <exclude domain="file" path="crash.txt" />
+</full-backup-content>
