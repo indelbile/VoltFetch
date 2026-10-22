@@ -37,7 +37,9 @@ class ScheduleReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED, AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED -> {
-                Schedules.reschedule(ctx); runCatching { PlaylistSync.schedule(ctx) }; return
+                Schedules.reschedule(ctx); runCatching { PlaylistSync.schedule(ctx) }
+                if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) runCatching { AppUpdater.onUpdated(ctx) }
+                return
             }
         }
         if (PlaylistSync.isSyncIntent(intent)) {

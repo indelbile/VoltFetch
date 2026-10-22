@@ -42,6 +42,8 @@ class VoltApp : Application() {
         // followed playlists: keep the nightly alarm set, and catch up if last night's check was missed
         runCatching { PlaylistSync.schedule(this); PlaylistSync.catchUp(this) }
         runCatching { Thumbs.prune(this, engine.views().filter { it.thumb.isNotEmpty() }.map { it.id }.toSet()) }
+        // new app version on GitHub? checked at most once a day
+        runCatching { AppUpdater.maybeCheck(this) }
         runCatching { Schedules.reschedule(this) }
         // keep the foreground service running whenever something is downloading
         main.post(object : Runnable {
@@ -111,6 +113,8 @@ class VoltApp : Application() {
         val s = engine.settings
         val nm = getSystemService(NotificationManager::class.java)
         if (e.kind == "settings") { Schedules.reschedule(this); return }
+        // a finished app-update download is installed right away (works without notification permission too)
+        if (e.kind == "complete") runCatching { AppUpdater.onDownloaded(this, e.id) }
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
         if (e.kind.startsWith("queue")) {
             val open = PendingIntent.getActivity(this, 40_000, Intent(this, MainActivity::class.java).putExtra("tab", "queues").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)

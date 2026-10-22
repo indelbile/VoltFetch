@@ -120,6 +120,9 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- app updates: the installer's answer and the "update available" notification -->
+        <receiver android:name="com.voltfetch.app.UpdateReceiver" android:exported="false" />
+
         <receiver android:name="com.voltfetch.app.ScheduleReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

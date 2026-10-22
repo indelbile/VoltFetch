@@ -1,3 +1,11 @@
+# Changes, round 8: app updates from GitHub Releases
+
+- **Update check:** once a day while the app is used, and on demand (Settings › App updates › Check for updates now). Reads the latest release of the app's public GitHub repository.
+- **Auto update:** the APK for the phone's processor is downloaded through VoltFetch's own download manager, verified (same app, newer, same signing key) and installed with Android's PackageInstaller. Android asks to confirm the first time; after that (Android 12+) updates install by themselves.
+- **Settings › App updates:** check now, check automatically, download and install automatically (Wi-Fi), update source (the repository is built in by the workflow).
+- **Workflow:** version code = 100 + number of commits (always increasing), dev builds named dev-<code>, releases get a `version.json`.
+- **UPDATES.md:** how to publish an update.
+
 # Changes, round 7: ad blocker in the browser
 
 - **Network blocking:** requests to ad and tracker servers are blocked (built-in list plus Peter Lowe's and AdAway's community lists, downloaded on first use and refreshed weekly). A site's own domain is never blocked, so sites you open still load.

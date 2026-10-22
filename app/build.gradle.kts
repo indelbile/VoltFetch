@@ -21,6 +21,8 @@ android {
         targetSdk = 34
         versionCode = (System.getenv("VERSION_CODE") ?: "4").toInt()
         versionName = System.getenv("VERSION_NAME") ?: "1.1.1"
+        // Where the in-app updater looks for new releases: GitHub Actions sets GITHUB_REPOSITORY ("owner/repo").
+        buildConfigField("String", "UPDATE_REPO", "\"${System.getenv("GITHUB_REPOSITORY") ?: ""}\"")
     }
 
     // Phones only: arm64-v8a (almost every phone) and armeabi-v7a (older 32-bit phones).
@@ -53,6 +55,8 @@ android {
             signingConfig = if (ksFile != null) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
     }
+
+    buildFeatures { buildConfig = true }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

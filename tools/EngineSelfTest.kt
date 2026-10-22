@@ -518,6 +518,18 @@ fun main(args: Array<String>) {
     check("ads: a site's own domain is never blocked", !af.isAd("https://cdn.taboola.com/x.js", "www.taboola.com") && af.isAd("https://cdn.taboola.com/x.js", "news.example.com"))
     check("ads: same-site rules", AdFilter.site("news.bbc.co.uk") == "bbc.co.uk" && AdFilter.site("m.youtube.com") == "youtube.com" && AdFilter.sameSite("a.b.example.com", "example.com"))
 
+    // 13c. app updates from GitHub Releases
+    val rel = """{"tag_name":"v1.3.0","name":"VoltFetch 1.3.0","body":"Fixes","draft":false,"prerelease":false,"assets":[
+        {"name":"VoltFetch-1.3.0-armeabi-v7a.apk","size":47000000,"browser_download_url":"https://github.com/a/b/releases/download/v1.3.0/VoltFetch-1.3.0-armeabi-v7a.apk"},
+        {"name":"VoltFetch-1.3.0-arm64-v8a.apk","size":54000000,"browser_download_url":"https://github.com/a/b/releases/download/v1.3.0/VoltFetch-1.3.0-arm64-v8a.apk"},
+        {"name":"version.json","size":40,"browser_download_url":"https://github.com/a/b/releases/download/v1.3.0/version.json"}]}"""
+    val r64 = AppUpdate.parseLatest(rel, listOf("arm64-v8a", "armeabi-v7a", "armeabi"))
+    check("update: picks the phone's APK", r64?.apkName == "VoltFetch-1.3.0-arm64-v8a.apk" && r64.apkSize == 54000000L && r64.tag == "v1.3.0" && r64.versionUrl.endsWith("version.json"), "$r64")
+    check("update: 32-bit phone gets armeabi-v7a", AppUpdate.parseLatest(rel, listOf("armeabi-v7a", "armeabi"))?.apkName == "VoltFetch-1.3.0-armeabi-v7a.apk")
+    check("update: ignores prereleases and releases without version.json", AppUpdate.parseLatest(rel.replace("\"prerelease\":false", "\"prerelease\":true"), listOf("arm64-v8a")) == null && AppUpdate.parseLatest(rel.replace("version.json", "notes.txt"), listOf("arm64-v8a")) == null)
+    check("update: versionCode read", AppUpdate.versionCode("{\"versionCode\":187,\"versionName\":\"1.3.0\"}") == 187L && AppUpdate.versionCode("oops") == -1L)
+    check("update: repo from address", AppUpdate.repo("https://github.com/amit/VoltFetch/") == "amit/VoltFetch" && AppUpdate.repo("amit/VoltFetch") == "amit/VoltFetch" && AppUpdate.repo("not a repo") == null && AppUpdate.repo("https://github.com/amit") == null)
+
     // 14. helpers
     check("json round trip", (Json.parse(Json.encode(mapOf("a" to "x\"y\n", "b" to listOf(1L, 2L), "c" to true))) as Map<*, *>)["a"] == "x\"y\n")
     check("links from shared text", Links.find("Look: https://ex.com/a.zip, and http://b.org/x.pdf.") == listOf("https://ex.com/a.zip", "http://b.org/x.pdf"))

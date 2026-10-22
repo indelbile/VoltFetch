@@ -390,6 +390,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        AppUpdater.maybeCheck(this) // at most once a day
         if (themeSig != "${Palette.of(this).dark}") build()
         aurora.animate = engine.settings.motion; aurora.invalidate()
         queuesSig = ""

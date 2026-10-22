@@ -104,6 +104,17 @@ class SettingsActivity : Screen() {
             toggleRow("Check for updates weekly", "Only on Wi-Fi, and never while a media download is running.", MediaEngine.autoUpdate(this)) { MediaEngine.setAutoUpdate(this, it) },
         )
 
+        // App updates from the GitHub repository's releases
+        val upLast = AppUpdater.lastCheck(this)
+        val repo = AppUpdater.repo(this)
+        section("App updates",
+            navRow(R.drawable.ic_refresh, if (checkingUpdate) "Checking for updates…" else "Check for updates now",
+                "You have ${AppUpdater.installedName(this)}" + if (upLast > 0) " · ${AppUpdater.lastResult(this)}, ${whenText(upLast)}" else "", p.accent) { checkUpdateNow() },
+            toggleRow("Check automatically", "Once a day while you use VoltFetch.", AppUpdater.autoCheck(this)) { AppUpdater.setAutoCheck(this, it) },
+            toggleRow("Download and install automatically", "On Wi-Fi. Android asks you to confirm the first update; after that they install by themselves (Android 12+).", AppUpdater.autoInstall(this)) { AppUpdater.setAutoInstall(this, it) },
+            navRow(R.drawable.ic_globe, "Update source", if (repo.isBlank()) "Not set: tap to enter your GitHub repository" else "github.com/$repo", p.tide) { editRepo() },
+        )
+
         // Browser ad blocker
         val adLast = AdBlock.lastUpdate(this)
         section("Browser",
@@ -136,6 +147,38 @@ class SettingsActivity : Screen() {
         about.addView(k.badge("Version $ver", p.accent))
         about.addView(k.text("Fast, multi-connection downloads for Android.\nFiles are saved in Download/VoltFetch, sorted by type.", 13f, p.mute).apply { gravity = Gravity.CENTER; setLineSpacing(0f, 1.3f); setPadding(dp(16), 0, dp(16), 0) })
         body.addView(k.card(about))
+    }
+
+    @Volatile private var checkingUpdate = false
+
+    private fun checkUpdateNow() {
+        if (checkingUpdate) return
+        checkingUpdate = true; frame()
+        Thread {
+            val r = AppUpdater.check(this)
+            runOnUiThread {
+                checkingUpdate = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                frame()
+                if (r is AppUpdater.Result.Available) {
+                    dialog().setTitle(r.release.name)
+                        .setMessage("You have ${AppUpdater.installedName(this)}.\n\n" + r.release.notes.take(1500).ifBlank { "A new version is ready." })
+                        .setPositiveButton("Download and install") { _, _ -> AppUpdater.download(this, r); toast("Downloading the update…") }
+                        .setNegativeButton("Later", null).show()
+                } else toast(r.message)
+            }
+        }.start()
+    }
+
+    private fun editRepo() {
+        val input = k.input("owner/repository or github.com link", AppUpdater.repo(this))
+        dialog().setTitle("Update source").setMessage("The public GitHub repository whose Releases hold VoltFetch's APKs. Builds made by its workflow set this by themselves.")
+            .setView(padded(input))
+            .setPositiveButton("Save") { _, _ ->
+                val r = com.voltfetch.engine.AppUpdate.repo(input.text.toString())
+                if (r == null) toast("Enter it like amit/VoltFetch") else { AppUpdater.setRepo(this, r); frame(); toast("Saved") }
+            }
+            .setNegativeButton("Cancel", null).show()
     }
 
     private fun showFollows() {

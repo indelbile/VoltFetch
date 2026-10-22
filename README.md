@@ -37,6 +37,10 @@ YouTube changes often. On first start the app installs yt-dlp **2026.10.21** (th
 - Some videos are inaccessible because of age, region, account, or platform restrictions.
 - Download only content you own, have permission to save, or are otherwise legally entitled to download. Follow applicable copyright law and platform terms. VoltFetch does not attempt DRM circumvention.
 
+## App updates
+
+VoltFetch updates itself from this repository's GitHub Releases (Settings › App updates). See **UPDATES.md** for how to publish a release.
+
 ## Privacy
 
 Site passwords and browser cookies saved with downloads are encrypted with a key held in the Android Keystore. The download list, temporary media files and crash logs are excluded from Android backups; settings are still backed up.
