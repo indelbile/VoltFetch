@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history: the version code is the number of commits
 
       - uses: actions/setup-java@v4
         with:
@@ -34,11 +36,16 @@ jobs:
             echo "::warning::KEYSTORE_BASE64 secret not set - the APK will be signed with a throwaway debug key."
           fi
 
-      - name: Version from tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Version code = 100 + number of commits (always grows). Tag v1.3.0 sets the name; other builds are dev-<code>.
+      - name: Version
         run: |
-          echo "VERSION_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          echo "VERSION_CODE=${{ github.run_number }}" >> "$GITHUB_ENV"
+          CODE=$((100 + $(git rev-list --count HEAD)))
+          echo "VERSION_CODE=$CODE" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION_NAME=dev-$CODE" >> "$GITHUB_ENV"
+          fi
 
       - name: Build
         env:
@@ -49,21 +56,27 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
           mkdir -p out
-          # one APK per ABI plus a universal one, e.g. VoltFetch-1.2.0-arm64-v8a.apk
           for f in app/build/outputs/apk/release/*.apk; do
             abi=$(basename "$f" .apk | sed -E 's/^app-(.*)-release(-unsigned)?$/\1/')
             cp "$f" "out/VoltFetch-${VERSION_NAME:-dev}-${abi}.apk"
           done
+          # read by the in-app updater to decide whether a release is newer than what's installed
+          echo "{\"versionCode\": $VERSION_CODE, \"versionName\": \"$VERSION_NAME\"}" > out/version.json
           ls -l out
 
       - uses: actions/upload-artifact@v4
         with:
           name: VoltFetch-apk
-          path: out/*.apk
+          path: |
+            out/*.apk
+            out/version.json
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: out/*.apk
+          files: |
+            out/*.apk
+            out/version.json
           generate_release_notes: true
+          make_latest: true
