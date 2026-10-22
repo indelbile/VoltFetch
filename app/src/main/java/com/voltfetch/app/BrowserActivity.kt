@@ -31,7 +31,10 @@ import android.widget.TextView
 import android.widget.Toast
 import com.voltfetch.engine.Links
 import com.voltfetch.engine.Names
+import com.voltfetch.engine.MediaKinds
+import com.voltfetch.engine.MediaSites
 import com.voltfetch.engine.NoCapture
+import com.voltfetch.engine.YouTube
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -61,6 +64,10 @@ class BrowserActivity : Activity() {
     /** Old WebView without document-start scripts: the ad script is injected when each page starts instead. */
     private var adFallback = false
     @Volatile private var shieldQueued = false
+    private var bgScript: androidx.webkit.ScriptHandler? = null
+    private var findBar: LinearLayout? = null
+    private var findInput: EditText? = null
+    private var findCount: TextView? = null
     private lateinit var progress: View
     private lateinit var home: ScrollView
     private lateinit var pill: TextView
@@ -90,6 +97,7 @@ class BrowserActivity : Activity() {
             settings.displayZoomControls = false
             settings.mediaPlaybackRequiresUserGesture = true
             if (session.getBoolean("desktop", false)) settings.userAgentString = DESKTOP_AGENT
+            settings.textZoom = session.getInt("textZoom", 100)
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             if (android.os.Build.VERSION.SDK_INT >= 29) settings.forceDark = if (p.dark) WebSettings.FORCE_DARK_AUTO else WebSettings.FORCE_DARK_OFF
             setBackgroundColor(p.ink)
@@ -108,6 +116,7 @@ class BrowserActivity : Activity() {
         registerForContextMenu(web)
         AdBlock.load(this)
         installAdScript()
+        installBgScript()
         root.addView(web, FrameLayout.LayoutParams(-1, -1))
 
         home = buildHome()
@@ -121,7 +130,7 @@ class BrowserActivity : Activity() {
         pill = k.text("", 14f, Color.WHITE, Type.medium).apply {
             gravity = Gravity.CENTER; setPadding(dp(18), 0, dp(20), 0); minHeight = dp(50)
             elevation = dpf(10f); visibility = View.GONE
-            setOnClickListener { haptic(this, true); if (isYouTubeUrl(pageUrl)) startActivity(Intent(this@BrowserActivity, MediaActivity::class.java).putExtra("url", pageUrl)) else showMedia() }
+            setOnClickListener { haptic(this, true); if (mediaUrl() != null) mediaSheet() else showMedia() }
             pressable()
         }
         root.addView(pill, FrameLayout.LayoutParams(-2, dp(50), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
@@ -240,6 +249,29 @@ class BrowserActivity : Activity() {
             setOnEditorActionListener { v, _, _ -> go((v as EditText).text.toString()); true }
         }
         box.addView(search, lp(-1, -2).apply { topMargin = dp(6) })
+        val marks = bookmarks()
+        if (marks.isNotEmpty()) {
+            box.addView(k.sectionTitle("Bookmarks").apply { gravity = Gravity.START }, lp(-1, -2))
+            val list = k.vbox(gap = dp(8))
+            for ((u, t) in marks.take(12)) {
+                val host = runCatching { Uri.parse(u).host ?: u }.getOrDefault(u).removePrefix("www.")
+                val row = k.hbox(dp(12)).apply { setPadding(dp(14), dp(12), dp(12), dp(12)) }
+                val badge = k.text("★", 15f, Color.WHITE, Type.black).apply { gravity = Gravity.CENTER; background = gradient(dpf(12f), p.hold, p.violet) }
+                row.addView(badge, LinearLayout.LayoutParams(dp(36), dp(36)))
+                val tx = k.vbox(gap = dp(2)); tx.addView(k.text(t, 14.5f, p.fg, Type.medium, lines = 1)); tx.addView(k.text(host, 11.5f, p.mute, lines = 1))
+                row.addView(tx, lp(0, -2, 1f))
+                val card = k.card(row, 0)
+                card.setOnClickListener { haptic(it); go(u) }
+                // long-press: remove, after asking
+                card.setOnLongClickListener {
+                    dialogB().setTitle("Remove bookmark?").setMessage(t).setPositiveButton("Remove") { _, _ -> saveBookmarks(bookmarks().filter { it.first != u }); refreshHome() }
+                        .setNegativeButton("Cancel", null).show(); true
+                }
+                card.pressable(.98f)
+                list.addView(card)
+            }
+            box.addView(list, lp(-1, -2))
+        }
         val recents = recent()
         if (recents.isNotEmpty()) {
             box.addView(k.sectionTitle("Recent sites").apply { gravity = Gravity.START }, lp(-1, -2))
@@ -269,6 +301,7 @@ class BrowserActivity : Activity() {
     }
 
     private fun showHome() {
+        refreshHome()
         home.visibility = View.VISIBLE; home.alpha = 0f; home.animate().alpha(1f).setDuration(250).start()
         pageUrl = ""; address.setText(""); lock.visibility = View.GONE
         session.edit().remove("lastUrl").apply()
@@ -291,6 +324,7 @@ class BrowserActivity : Activity() {
     /** Back goes through the page history; on the first page it returns to the main screen and keeps the page. */
     private fun back() {
         when {
+            hideFind() -> {}
             address.hasFocus() -> { address.clearFocus(); getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(address.windowToken, 0) }
             web.canGoBack() && home.visibility != View.VISIBLE -> web.goBack()
             else -> minimize(showHint = true)
@@ -303,7 +337,9 @@ class BrowserActivity : Activity() {
     private fun menu() {
         val items = mutableListOf<Pair<String, () -> Unit>>()
         if (pageUrl.isNotEmpty()) {
-            if (isYouTubeUrl(pageUrl)) items.add("Download video / extract MP3" to { startActivity(Intent(this, MediaActivity::class.java).putExtra("url", pageUrl)) })
+            if (mediaUrl() != null) items.add("Download video / audio" to { mediaSheet() })
+            items.add((if (isBookmarked(liveUrl())) "★ Remove bookmark" else "☆ Add bookmark") to { toggleBookmark(liveUrl(), pageTitle) })
+            items.add("Find in page" to { showFind() })
             items.add("Grab files from this page" to { startActivity(Intent(this, GrabberActivity::class.java).putExtra("url", pageUrl)) })
             items.add("Download this address" to { openAdd(pageUrl, "", -1, "", web.settings.userAgentString) })
             items.add("Copy address" to { copy(pageUrl) })
@@ -319,6 +355,9 @@ class BrowserActivity : Activity() {
             toast(if (desktop) "Mobile site" else "Desktop site")
         })
         items.add((if (AdBlock.enabled(this)) "Ad blocker: on" else "Ad blocker: off") to { adDialog() })
+        items.add((if (session.getBoolean("bgPlay", false)) "✓ Background play" else "Background play") to { toggleBgPlay() })
+        items.add("Text size (${web.settings.textZoom}%)" to { textSize() })
+        if (pageUrl.isNotEmpty()) items.add("Save page as PDF" to { savePdf() })
         items.add("Start page" to { web.loadUrl("about:blank"); showHome() })
         items.add("Back to VoltFetch (keep this page)" to { minimize() })
         items.add("Close browser" to { closeBrowser() })
@@ -331,6 +370,180 @@ class BrowserActivity : Activity() {
                 }.setNegativeButton("Cancel", null).show()
         })
         dialogB().setItems(items.map { it.first }.toTypedArray()) { _, i -> items[i].second() }.show()
+    }
+
+    // ------------------------------------------------------------------ the page on screen
+
+    /** The page's address right now (app-like sites change it without loading a new page). */
+    private fun liveUrl(): String = web.url?.takeIf { it.startsWith("http") } ?: pageUrl
+
+    /** A downloadable video page: a YouTube video as its clean watch link, other known sites as they are. */
+    private fun mediaUrl(u: String = liveUrl()): String? = when {
+        u.isEmpty() -> null
+        YouTube.isUrl(u) -> YouTube.videoId(u)?.let { YouTube.watchUrl(it) } // YouTube home, search, channel: none
+        MediaSites.isKnown(u) && !Links.looksLikeFile(u) -> u
+        else -> null
+    }
+
+    /** Background lookup for YouTube video pages (other sites are looked up when the button is tapped). */
+    private val prefetchRun = Runnable { mediaUrl()?.takeIf { YouTube.isUrl(it) }?.let { Inspector.prefetch(this, it) } }
+
+    private fun onUrlChanged(url: String) {
+        if (!url.startsWith("http")) return
+        if (url.substringBefore('#') != pageUrl.substringBefore('#')) media.clear()
+        pageUrl = url
+        pageHost = runCatching { Uri.parse(url).host ?: "" }.getOrDefault("")
+        if (!address.hasFocus()) showAddress()
+        updateShield(); updatePill()
+        if (home.visibility != View.VISIBLE) session.edit().putString("lastUrl", url).apply()
+        // get the video's formats ready in the background; wait a moment so flicking through Shorts doesn't start a lookup per video
+        root.removeCallbacks(prefetchRun)
+        if (mediaUrl(url) != null) root.postDelayed(prefetchRun, 1500)
+    }
+
+    /** Quick download over the playing video: pick a quality or audio and it starts; "More options" opens the full screen. */
+    private fun mediaSheet() {
+        val url = mediaUrl() ?: run { startActivity(Intent(this, MediaActivity::class.java).putExtra("url", liveUrl())); return }
+        val info = Inspector.cached(this, url)
+        if (info == null) Inspector.prefetch(this, url)
+        val title = info?.optString("title", "")?.takeIf { it.isNotBlank() }
+            ?: pageTitle.removeSuffix(" - YouTube").trim().takeIf { it.isNotBlank() && !it.startsWith("http") }
+            ?: "${MediaSites.label(url)} video"
+        val heights = info?.optJSONArray("formats")?.let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.filter { it.optString("vcodec", "none") != "none" }
+                .map { it.optInt("height", 0) }.filter { it in 144..4320 }.distinct().sortedDescending()
+        }.orEmpty().ifEmpty { listOf(1080, 720, 480, 360) }.take(5)
+        fun cls(h: Int) = when { h >= 1500 -> " · 4K"; h >= 1300 -> " · 2K"; h >= 1000 -> " · Full HD"; h >= 700 -> " · HD"; else -> "" }
+        val rate = getSharedPreferences("media_ui", MODE_PRIVATE).getInt("lastRate", 192).let { r -> if (r in 64..320) r else 192 }
+        val items = ArrayList<Pair<String, () -> Unit>>()
+        for (h in heights) items.add("Video · ${h}p${cls(h)}" to { quickAdd(url, title, MediaKinds.VIDEO, h, info) })
+        items.add("Audio · original (best quality)" to { quickAdd(url, title, MediaKinds.AUDIO, 0, info) })
+        items.add("Audio · MP3 $rate kbps" to { quickAdd(url, title, MediaKinds.MP3, rate, info) })
+        items.add("More options… (clip, subtitles, playlist)" to { startActivity(Intent(this, MediaActivity::class.java).putExtra("url", url)) })
+        dialogB().setTitle(title).setItems(items.map { it.first }.toTypedArray()) { _, i -> items[i].second() }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun quickAdd(url: String, title: String, kind: String, option: Int, info: org.json.JSONObject?) {
+        val prefs = getSharedPreferences("media_ui", MODE_PRIVATE)
+        if (engine.views().any { it.url == url && it.taskKind == kind && it.taskOption == option && it.status != com.voltfetch.engine.Status.COMPLETE }) { toast("Already in your list"); return }
+        val opts = HashMap<String, String>()
+        if (prefs.getBoolean("ck", true)) opts["ck"] = "1"
+        if (prefs.getBoolean("sb", false) && YouTube.isUrl(url)) opts["sb"] = "1"
+        val subs = if (kind == MediaKinds.VIDEO && prefs.getBoolean("subs", false))
+            listOf(java.util.Locale.getDefault().language, "en").filter { it.matches(Regex("[a-z]{2,3}")) }.distinct().joinToString(",") else ""
+        val thumb = info?.optString("thumbnail", "")?.takeIf { it.startsWith("http") }
+            ?: YouTube.videoId(url)?.let { "https://i.ytimg.com/vi/$it/hqdefault.jpg" } ?: ""
+        runCatching {
+            engine.addMediaTask(url, title, kind, option, subs = subs, opts = opts, thumb = thumb, autoTitle = info == null)
+            prefs.edit().apply {
+                when (kind) { MediaKinds.VIDEO -> putInt("lastHeight", option); MediaKinds.MP3 -> { putString("lastAudioKind", kind); putInt("lastRate", option) }; else -> putString("lastAudioKind", kind) }
+            }.apply()
+            DownloadService.ensureRunning(this, force = true)
+            toast(when (kind) { MediaKinds.MP3 -> "Downloading MP3 · $option kbps"; MediaKinds.AUDIO -> "Downloading original audio"; else -> "Downloading ${option}p video" })
+        }.onFailure { toast("Couldn't add it: ${it.message ?: "error"}") }
+    }
+
+    // ------------------------------------------------------------------ bookmarks
+
+    private fun bookmarks(): List<Pair<String, String>> = session.getString("bookmarks", "").orEmpty().split('\n')
+        .filter { it.contains('\t') }.map { it.substringBefore('\t') to it.substringAfter('\t') }
+
+    private fun isBookmarked(url: String) = url.isNotEmpty() && bookmarks().any { it.first == url }
+
+    private fun saveBookmarks(list: List<Pair<String, String>>) =
+        session.edit().putString("bookmarks", list.joinToString("\n") { "${it.first}\t${it.second.replace('\t', ' ').replace('\n', ' ')}" }).apply()
+
+    private fun toggleBookmark(url: String, title: String) {
+        if (!url.startsWith("http")) return
+        if (isBookmarked(url)) { saveBookmarks(bookmarks().filter { it.first != url }); toast("Bookmark removed") }
+        else { saveBookmarks(listOf(url to title.ifBlank { url }) + bookmarks()); toast("Bookmarked") }
+    }
+
+    /** Rebuilds the start page (after bookmarks change), keeping its place and insets. */
+    private fun refreshHome() {
+        val i = root.indexOfChild(home)
+        val visible = home.visibility
+        root.removeView(home)
+        home = buildHome()
+        home.visibility = visible
+        home.setPadding(0, insetTop + dp(70), 0, insetBottom + dp(24))
+        root.addView(home, i, FrameLayout.LayoutParams(-1, -1))
+    }
+
+    // ------------------------------------------------------------------ find in page, text size, PDF, background play
+
+    private fun showFind() {
+        val bar = findBar ?: k.hbox(dp(6)).apply {
+            setPadding(dp(12), dp(4), dp(6), dp(4)); gravity = Gravity.CENTER_VERTICAL
+            background = glass(p, dpf(22f), this@BrowserActivity); elevation = dpf(8f)
+            val input = EditText(this@BrowserActivity).apply {
+                hint = "Find in page"; setHintTextColor(p.faint); setTextColor(p.fg); textSize = 14.5f; background = null; isSingleLine = true
+                imeOptions = EditorInfo.IME_ACTION_SEARCH
+                setOnEditorActionListener { _, _, _ -> web.findNext(true); true }
+                addTextChangedListener(object : android.text.TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun afterTextChanged(s: android.text.Editable?) { web.findAllAsync(s?.toString().orEmpty()) }
+                })
+            }
+            val count = k.text("", 12.5f, p.mute).apply { minWidth = dp(44); gravity = Gravity.CENTER }
+            addView(input, lp(0, dp(44), 1f)); addView(count)
+            addView(k.iconButton(R.drawable.ic_up, "Previous") { web.findNext(false) }, LinearLayout.LayoutParams(dp(40), dp(40)))
+            addView(k.iconButton(R.drawable.ic_down, "Next") { web.findNext(true) }, LinearLayout.LayoutParams(dp(40), dp(40)))
+            addView(k.iconButton(R.drawable.ic_x, "Close") { hideFind() }, LinearLayout.LayoutParams(dp(40), dp(40)))
+            web.setFindListener { active, n, done -> if (done) count.text = if (n == 0) "0/0" else "${active + 1}/$n" }
+            findInput = input; findCount = count
+            root.addView(this, FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply { setMargins(dp(10), insetTop + dp(64), dp(10), 0) })
+            findBar = this
+        }
+        bar.visibility = View.VISIBLE
+        findInput?.let { it.requestFocus(); getSystemService(InputMethodManager::class.java).showSoftInput(it, 0) }
+    }
+
+    private fun hideFind(): Boolean {
+        val bar = findBar ?: return false
+        if (bar.visibility != View.VISIBLE) return false
+        web.clearMatches(); findInput?.setText(""); bar.visibility = View.GONE
+        findInput?.let { getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(it.windowToken, 0) }
+        return true
+    }
+
+    private fun textSize() {
+        val sizes = intArrayOf(80, 90, 100, 115, 130, 150)
+        val labels = sizes.map { if (it == 100) "100% (normal)" else "$it%" }.toTypedArray()
+        dialogB().setTitle("Text size").setSingleChoiceItems(labels, sizes.indexOf(web.settings.textZoom).coerceAtLeast(0)) { d, i ->
+            web.settings.textZoom = sizes[i]; session.edit().putInt("textZoom", sizes[i]).apply(); d.dismiss()
+        }.setNegativeButton("Cancel", null).show()
+    }
+
+    /** Opens Android's print screen for the page; choose "Save as PDF" there. */
+    private fun savePdf() {
+        val name = Names.sanitize(pageTitle.ifBlank { "Web page" }.take(80))
+        runCatching {
+            getSystemService(android.print.PrintManager::class.java).print(name, web.createPrintDocumentAdapter(name), android.print.PrintAttributes.Builder().build())
+            toast("Choose \"Save as PDF\" as the printer")
+        }.onFailure { toast("Printing isn't available on this phone") }
+    }
+
+    private fun bgPlay() = session.getBoolean("bgPlay", false)
+    private fun bgFallback() = bgPlay() && bgScript == null
+
+    /** Background play: pages can't tell the app was left, so YouTube and others keep playing audio. */
+    private fun installBgScript() {
+        runCatching { bgScript?.remove() }
+        bgScript = null
+        if (!bgPlay()) return
+        if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT))
+            bgScript = runCatching { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(web, BG_SCRIPT, setOf("*")) }.getOrNull()
+    }
+
+    private fun toggleBgPlay() {
+        val on = !bgPlay()
+        session.edit().putBoolean("bgPlay", on).apply()
+        installBgScript()
+        if (pageUrl.isNotEmpty()) web.reload()
+        toast(if (on) "Background play on: audio keeps playing when you leave the browser" else "Background play off")
     }
 
     // ------------------------------------------------------------------ ad blocker
@@ -436,7 +649,7 @@ class BrowserActivity : Activity() {
                 pill.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, null, null)
                 if (pill.visibility != View.VISIBLE) { pill.visibility = View.VISIBLE; pill.enter() }
             }
-            pageUrl.isNotEmpty() && isYouTubeUrl(pageUrl) -> {
+            pageUrl.isNotEmpty() && mediaUrl(pageUrl) != null -> {
                 pill.text = "Video / audio download options"
                 pill.background = gradient(dpf(25f), p.violet, p.accent, p.tide, orientation = android.graphics.drawable.GradientDrawable.Orientation.LEFT_RIGHT)
                 pill.setTextColor(Color.WHITE)
@@ -540,14 +753,20 @@ class BrowserActivity : Activity() {
         override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
             if (url == "about:blank") return
             loading = true
-            if (url.substringBefore('#') != pageUrl.substringBefore('#')) { media.clear() }
-            pageUrl = url
-            pageHost = runCatching { Uri.parse(url).host ?: "" }.getOrDefault("")
+            onUrlChanged(url)
             if (adFallback && AdBlock.active(this@BrowserActivity, pageHost)) view.evaluateJavascript(AdBlock.script(this@BrowserActivity), null)
-            updateShield()
-            if (!address.hasFocus()) showAddress()
+            if (bgFallback()) view.evaluateJavascript(BG_SCRIPT, null)
             reload.setImageResource(R.drawable.ic_x)
-            updatePill()
+        }
+
+        /**
+         * YouTube, Instagram, Facebook and other app-like sites switch videos without loading a new page; only
+         * the address changes. This is the one callback that sees those changes, so the download button always
+         * works on the video that's actually playing.
+         */
+        override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+            super.doUpdateVisitedHistory(view, url, isReload)
+            if (url != pageUrl) onUrlChanged(url)
         }
 
         override fun onPageFinished(view: WebView, url: String) {
@@ -597,7 +816,12 @@ class BrowserActivity : Activity() {
     private fun dialogB() = android.app.AlertDialog.Builder(this, if (p.dark) android.R.style.Theme_DeviceDefault_Dialog_Alert else android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
-    override fun onPause() { super.onPause(); web.onPause(); CookieManager.getInstance().flush() }
+    override fun onPause() {
+        super.onPause()
+        // with background play on, the page keeps running (audio continues) when the browser is left
+        if (!bgPlay()) web.onPause()
+        CookieManager.getInstance().flush()
+    }
     override fun onResume() {
         super.onResume(); web.onResume()
         // the blocker may have been switched in Settings meanwhile
@@ -607,6 +831,12 @@ class BrowserActivity : Activity() {
     override fun onDestroy() { (web.parent as? android.view.ViewGroup)?.removeView(web); web.destroy(); super.onDestroy() }
 
     companion object {
+        /** Makes pages believe they're still visible, so they don't pause audio when the app is left. */
+        private const val BG_SCRIPT = "(function(){if(window.__vfBg)return;window.__vfBg=1;try{Object.defineProperty(document,'hidden',{get:function(){return false},configurable:true});" +
+            "Object.defineProperty(document,'visibilityState',{get:function(){return 'visible'},configurable:true});" +
+            "Object.defineProperty(document,'webkitVisibilityState',{get:function(){return 'visible'},configurable:true});}catch(e){}" +
+            "var b=function(e){e.stopImmediatePropagation();};document.addEventListener('visibilitychange',b,true);window.addEventListener('visibilitychange',b,true);" +
+            "document.addEventListener('webkitvisibilitychange',b,true);window.addEventListener('pagehide',b,true);window.addEventListener('blur',b,true);})();"
         const val DESKTOP_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
     }
 }

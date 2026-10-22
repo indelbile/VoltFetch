@@ -1,3 +1,14 @@
+# Changes, round 9: browser download button follows the playing video, more browser tools
+
+- **Fixed: wrong video offered.** YouTube (and Instagram, Facebook…) switch videos without loading a new page, so the browser kept the previous video's address. It now follows every address change (`doUpdateVisitedHistory`) and reads the live address when the button is tapped.
+- **Ready in the background:** when a YouTube video opens (and stays open for 1.5 s), its formats are looked up in the background; lookups are keyed by video ID, so the result is reused everywhere.
+- **Quick download sheet:** the "Video / audio download options" button opens a list over the playing video (exact qualities when ready, otherwise 1080/720/480/360, original audio, MP3); tapping one starts the download. "More options…" opens the full Media downloader.
+- **Bookmarks:** ⋯ › Add bookmark; shown on the start page (long-press to remove).
+- **Find in page** with match count and next/previous.
+- **Text size** (80–150 %), remembered.
+- **Save page as PDF** (Android's print screen › Save as PDF).
+- **Background play:** pages aren't told the app was left, so YouTube audio keeps playing when you leave the browser.
+
 # Changes, round 8: app updates from GitHub Releases
 
 - **Update check:** once a day while the app is used, and on demand (Settings › App updates › Check for updates now). Reads the latest release of the app's public GitHub repository.

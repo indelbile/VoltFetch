@@ -27,7 +27,21 @@ object Inspector {
     private val cache = ConcurrentHashMap<String, Hit>()
     private val running = ConcurrentHashMap<String, FutureTask<String>>()
 
-    private fun key(url: String, mode: String, login: Boolean) = "$mode|$login|$url"
+    /** YouTube videos are keyed by their ID, so m.youtube.com/watch?v=X&pp=… and youtu.be/X share one result. */
+    private fun key(url: String, mode: String, login: Boolean): String {
+        val id = if (mode == "video") YouTube.videoId(url) else null
+        return if (id != null) "$mode|$login|yt:$id" else "$mode|$login|$url"
+    }
+
+    private fun modeFor(url: String) = if (YouTube.isUrl(url)) "video" else "auto"
+    private fun login(ctx: Context) = ctx.getSharedPreferences("media_ui", Context.MODE_PRIVATE).getBoolean("ck", true)
+
+    /** The finished lookup for [url] if it's already there (never waits, never starts one). */
+    fun cached(ctx: Context, url: String): JSONObject? {
+        val hit = cache[key(url, modeFor(url), login(ctx))] ?: return null
+        if (System.currentTimeMillis() - hit.at >= TTL) return null
+        return runCatching { JSONObject(hit.json) }.getOrNull()
+    }
 
     /** mode: "video" (single item), "playlist" (entries only, fast) or "auto" (whatever the link is). Blocks; call off the main thread. */
     fun fetch(ctx: Context, url: String, mode: String, useLogin: Boolean): JSONObject {
@@ -52,8 +66,8 @@ object Inspector {
     fun prefetch(ctx: Context, url: String) {
         if (!MediaSites.isKnown(url)) return
         val app = ctx.applicationContext
-        val login = app.getSharedPreferences("media_ui", Context.MODE_PRIVATE).getBoolean("ck", true)
-        val mode = if (YouTube.isUrl(url)) "video" else "auto"
+        val login = login(app)
+        val mode = modeFor(url)
         if (YouTube.isUrl(url) && YouTube.videoId(url) == null) return // playlist-only links are checked on demand
         if (cache[key(url, mode, login)] != null || running.containsKey(key(url, mode, login))) return
         Thread({ runCatching { fetch(app, url, mode, login) } }, "voltfetch-prefetch").apply { isDaemon = true }.start()
