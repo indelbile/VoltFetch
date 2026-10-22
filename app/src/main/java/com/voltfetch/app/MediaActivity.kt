@@ -51,14 +51,17 @@ class MediaActivity : Screen() {
     private var queuePick: () -> String = { MAIN_QUEUE }
     @Volatile private var busy = false
     private var generation = 0
-    @Volatile private var inspectId: String? = null
     private var inspectedUrl = ""
     private var videoTitle = ""
     private var videoThumb = ""
     private var videoDuration = 0L
     private val ui = Handler(Looper.getMainLooper())
     private var autoChecked = ""
-    private var clipTried = false
+    private var openedWithLink = false
+    /** The link being checked right now; quality and audio buttons already work for it. */
+    private var pendingUrl = ""
+    private var quickTitle = ""
+    private var quickThumb = ""
     /** A pasted link is checked by itself shortly after it lands in the box. */
     private val autoCheck = Runnable {
         val u = currentUrl()
@@ -99,7 +102,7 @@ class MediaActivity : Screen() {
                     ui.removeCallbacks(autoCheck)
                     val text = s?.toString()
                     val u = MediaSites.find(text) ?: return
-                    if (u != autoChecked && u != inspectedUrl && Links.find(text).isNotEmpty()) ui.postDelayed(autoCheck, 700)
+                    if (u != autoChecked && u != inspectedUrl && Links.find(text).isNotEmpty()) ui.postDelayed(autoCheck, 350)
                 }
             })
         }
@@ -173,6 +176,7 @@ class MediaActivity : Screen() {
         }
         body.addView(k.card(statusText, dp(2)))
         updateLoginText()
+        openedWithLink = initial.isNotEmpty()
         if (initial.isNotEmpty() && inspectedUrl != initial) inspect()
     }
 
@@ -191,17 +195,25 @@ class MediaActivity : Screen() {
         }
     }
 
-    /** Opened with an empty box and a video link on the clipboard: fill it in (it's then checked by itself). */
+    /**
+     * Each time this screen comes to the front, the newest link on the clipboard goes into the box (and is
+     * checked at once). A link the screen was opened with (share, browser) stays until a different one is copied;
+     * a link you typed yourself isn't replaced by the same clipboard link again.
+     */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus || clipTried || !::urlIn.isInitialized) return
-        clipTried = true
-        if (urlIn.text.toString().isNotBlank()) return
+        if (!hasFocus || !::urlIn.isInitialized) return
         val clip = runCatching { getSystemService(ClipboardManager::class.java)?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString() }.getOrNull()
-        val url = Links.find(clip).firstOrNull { MediaSites.isKnown(it) && !Links.looksLikeFile(it) } ?: return
+        val links = Links.find(clip)
+        val url = links.firstOrNull { MediaSites.isKnown(it) } ?: links.firstOrNull() ?: return
+        if (openedWithLink) { openedWithLink = false; lastClipApplied = url; return }
+        val box = MediaSites.find(urlIn.text.toString())
+        if (url == box || (url == lastClipApplied && urlIn.text.toString().isNotBlank())) return
+        lastClipApplied = url
         urlIn.setText(url)
         urlIn.setSelection(url.length)
-        toast("Pasted the link you copied")
+        ui.removeCallbacks(autoCheck)
+        if (!busy) inspect()
     }
 
     /** Remembered for next time and for "Save video" / "Save audio" in the share menu. */
@@ -219,7 +231,11 @@ class MediaActivity : Screen() {
         super.onDestroy()
         ui.removeCallbacks(autoCheck)
         generation++
-        inspectId?.let { id -> runCatching { YoutubeDL.getInstance().destroyProcessById(id) } }
+    }
+
+    companion object {
+        /** The clipboard link last put in the box (kept while the app runs). */
+        @Volatile private var lastClipApplied = ""
     }
 
     // ------------------------------------------------------------------ checking a link
@@ -236,22 +252,45 @@ class MediaActivity : Screen() {
         val token = ++generation
         busy = true; setBusy(true)
         inspectedUrl = ""; videoTitle = ""; videoThumb = ""; videoDuration = 0; playlistEntries = emptyList(); playlistUrl = ""
+        pendingUrl = raw; quickTitle = ""; quickThumb = ""
         playlistBox.visibility = View.GONE; playlistBox.removeAllViews()
         updateLoginText()
-        statusText.text = if (MediaEngine.ready) "Checking the link on this phone…" else "Starting the media engine (first use can take a little while)…"
+        val single = !yt || videoId != null
+        if (single) showPresets(raw)
+        statusText.text = when {
+            MediaEngine.updating -> "Updating the media engine to the latest yt-dlp (one time, a few seconds)…"
+            !MediaEngine.ready -> "Starting the media engine (first use can take a little while)…"
+            single -> "Loading exact qualities and sizes… You can already tap a quality or an audio option."
+            else -> "Loading the playlist…"
+        }
         val useLogin = pref("ck", true)
+        // title and thumbnail in about a second while the full check runs
+        if (single) Thread {
+            val q = Inspector.quickInfo(raw) ?: return@Thread
+            runOnUiThread {
+                if (isFinishing || isDestroyed || token != generation || inspectedUrl.isNotEmpty()) return@runOnUiThread
+                quickTitle = q.title; quickThumb = q.thumb
+                infoBox.removeAllViews()
+                infoBox.addView(k.text(q.title, 16f, p.fg, Type.medium))
+                infoBox.addView(k.text("${MediaSites.label(raw)}${if (q.author.isNotBlank()) " · By ${q.author}" else ""} · loading details…", 11.5f, p.mute))
+            }
+        }.start()
         Thread {
-            // YouTube: the video and its playlist separately. Other sites: one look, which says whether it's a playlist.
-            val first = if (!yt || videoId != null || listId == null) runCatching { dumpJson(raw, if (yt) "video" else "auto", useLogin) } else null
-            val list = if (listId != null) runCatching { dumpJson(YouTube.playlistUrl(listId), "playlist", useLogin) } else null
+            // YouTube: the video and its playlist at the same time. Other sites: one look, which says whether it's a playlist.
+            var list: Result<JSONObject>? = null
+            val listThread = if (listId != null) Thread { list = runCatching { Inspector.fetch(this, YouTube.playlistUrl(listId), "playlist", useLogin) } }.also { it.start() } else null
+            val first = if (!yt || videoId != null || listId == null) runCatching { Inspector.fetch(this, raw, if (yt) "video" else "auto", useLogin) } else null
+            listThread?.join()
             runOnUiThread {
                 if (isFinishing || isDestroyed || token != generation) return@runOnUiThread
-                busy = false; setBusy(false)
+                busy = false; setBusy(false); pendingUrl = ""
                 first?.onSuccess { json ->
                     if (json.optString("_type") == "playlist") showPlaylist(json, raw) else showVideo(raw, json)
                 }
                 list?.onSuccess { showPlaylist(it, YouTube.playlistUrl(listId!!)) }
                 val err = first?.exceptionOrNull() ?: if (first == null) list?.exceptionOrNull() else null
+                // the check failed but the quality/audio buttons may still work (e.g. a passing network hiccup)
+                if (err != null && first != null) pendingUrl = raw
                 statusText.text = when {
                     err != null && playlistEntries.isNotEmpty() -> "Couldn't load this video (${friendlyError(err)}), but its playlist is shown above."
                     err != null -> "Couldn't check this link: ${friendlyError(err)}\n\n" + hintFor(err)
@@ -270,21 +309,6 @@ class MediaActivity : Screen() {
             Regex("login|log in|cookies|private|rate-limit", RegexOption.IGNORE_CASE).containsMatchIn(m) -> "This site wants a login. Sign in to it in VoltFetch's Browser tab, keep \"Use my browser login\" on, and check the link again."
             else -> "Check your connection and try again. If many links fail, update the media engine in Settings."
         }
-    }
-
-    /** mode: "video" (single item), "playlist" (entries only, fast) or "auto" (whatever the link is). */
-    private fun dumpJson(url: String, mode: String, useLogin: Boolean): JSONObject = MediaEngine.use(this) {
-        val id = "voltfetch-inspect-${System.nanoTime()}"
-        inspectId = id
-        val cookies = File(cacheDir, "inspect-cookies-${System.nanoTime()}.txt")
-        val request = YoutubeDLRequest(url).apply {
-            addOption("--dump-single-json"); addOption("--skip-download"); addOption("--no-warnings")
-            when (mode) { "video" -> addOption("--no-playlist"); else -> addOption("--flat-playlist") }
-            val s = engine.settings
-            if (s.proxyOn && s.proxyHost.isNotBlank()) addOption("--proxy", "http://${s.proxyHost.trim()}:${s.proxyPort}")
-            if (useLogin && BrowserCookies.writeNetscape(url, cookies)) addOption("--cookies", cookies.absolutePath)
-        }
-        try { JSONObject(YoutubeDL.getInstance().execute(request, id).out) } finally { inspectId = null; runCatching { cookies.delete() } }
     }
 
     private fun thumbOf(json: JSONObject): String {
@@ -366,6 +390,14 @@ class MediaActivity : Screen() {
             }
             formatsBox.addView(qualityRow(label, detail) { enqueueSingle(MediaKinds.VIDEO, quality.height.coerceIn(144, 4320)) })
         }
+    }
+
+    /** Quality buttons shown at once while the exact list loads; the download picks the best match itself. */
+    private fun showPresets(url: String) {
+        formatsBox.removeAllViews()
+        formatsBox.addView(k.text("Exact qualities and sizes are loading. These already work: each picks the best available up to that height.", 12f, p.mute).apply { setLineSpacing(0f, 1.15f) })
+        for ((h, label) in listOf(2160 to "Best quality (up to 4K)", 1080 to "1080p · Full HD", 720 to "720p · HD", 480 to "480p", 360 to "360p · smallest"))
+            formatsBox.addView(qualityRow(label, "MP4 · best available up to ${h}p") { enqueueSingle(MediaKinds.VIDEO, h) })
     }
 
     private fun qualityRow(label: String, detail: String, onGet: () -> Unit): View {
@@ -475,12 +507,16 @@ class MediaActivity : Screen() {
     /** Media tasks are ordinary Engine items: queued, persisted, notified, paused/resumed and removed centrally. */
     private fun enqueueSingle(kind: String, option: Int) {
         val raw = currentUrl()
-        if (raw == null || inspectedUrl != raw || videoTitle.isBlank()) { toast(if (playlistEntries.isNotEmpty()) "Use the playlist buttons for this link" else "Check this link first so its details are loaded"); return }
+        val ready = raw != null && inspectedUrl == raw && videoTitle.isNotBlank()
+        // still loading: queue now; the engine fills in the real title when it starts
+        val early = raw != null && !ready && raw == pendingUrl
+        if (raw == null || (!ready && !early)) { toast(if (playlistEntries.isNotEmpty()) "Use the playlist buttons for this link" else "Paste a link first"); return }
         val opts = chosenOpts(single = true) ?: return
         if (MediaOpts.clip(opts) == null && alreadyQueued(raw, kind, option)) { toast("This one is already in your list"); return }
         runCatching {
             val subs = if (kind == MediaKinds.VIDEO && pref("subs", false)) subLangs else ""
-            val item = engine.addMediaTask(raw, videoTitle, kind, option, queue = queuePick(), subs = subs, opts = opts, thumb = videoThumb)
+            val item = if (ready) engine.addMediaTask(raw, videoTitle, kind, option, queue = queuePick(), subs = subs, opts = opts, thumb = videoThumb)
+                else engine.addMediaTask(raw, quickTitle.ifBlank { "${MediaSites.label(raw)} media" }, kind, option, queue = queuePick(), subs = subs, opts = opts, thumb = quickThumb, autoTitle = true)
             remember(kind, option)
             DownloadService.ensureRunning(this, force = true)
             val description = when (kind) { MediaKinds.MP3 -> "MP3 · $option kbps"; MediaKinds.AUDIO -> "original audio"; else -> "video up to ${option}p${if (subs.isNotEmpty()) " with subtitles" else ""}" } +

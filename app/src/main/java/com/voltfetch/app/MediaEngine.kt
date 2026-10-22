@@ -19,14 +19,32 @@ object MediaEngine {
 
     @Volatile var ready = false
         private set
+    /** True while yt-dlp is being brought up to [MIN_VERSION] on first start. */
+    @Volatile var updating = false
+        private set
+
+    /**
+     * The yt-dlp release this build expects. The Android library bundles an older one (late 2025), so on first
+     * start the app installs this release from yt-dlp's official GitHub releases before any media job runs.
+     * Later releases (Settings › Update media engine, or the weekly check) are always welcome.
+     */
+    const val MIN_VERSION = "2026.10.21"
+    private val pinned = object : YoutubeDL.UpdateChannel("https://api.github.com/repos/yt-dlp/yt-dlp/releases/tags/$MIN_VERSION") {}
     @Volatile private var initError: Throwable? = null
     private val lock = ReentrantReadWriteLock()
+    /** Opens once the start-up yt-dlp version check is done, so the first jobs never run on the old version. */
+    private val startupDone = java.util.concurrent.CountDownLatch(1)
 
     /** Kicks off start-up in the background; safe to call many times. */
     fun start(ctx: Context) {
         val app = ctx.applicationContext
         Thread({
-            initNow(app)
+            try {
+                initNow(app)
+                if (ready) runCatching { ensureMinimum(app) }
+            } finally {
+                startupDone.countDown()
+            }
             if (ready) runCatching { maybeAutoUpdate(app) }
         }, "voltfetch-media-init").apply { isDaemon = true }.start()
     }
@@ -51,16 +69,39 @@ object MediaEngine {
     /** Runs [block] with the engine ready and protected from being updated underneath it. */
     fun <T> use(ctx: Context, block: () -> T): T {
         awaitReady(ctx)
+        startupDone.await(90, java.util.concurrent.TimeUnit.SECONDS)
         lock.readLock().lock()
         try { return block() } finally { lock.readLock().unlock() }
     }
 
-    /** The yt-dlp version in use, or a placeholder when it hasn't been updated since install. */
+    /** The yt-dlp version in use (its release tag, e.g. 2026.10.21), or a placeholder before the first update. */
     fun version(ctx: Context): String {
         if (!ready) return "Starting…"
+        if (updating) return "updating…"
         val app = ctx.applicationContext
-        return runCatching { YoutubeDL.getInstance().versionName(app) ?: YoutubeDL.getInstance().version(app) }.getOrNull()
-            ?.takeIf { it.isNotBlank() } ?: "Bundled with the app"
+        return runCatching { YoutubeDL.getInstance().version(app) }.getOrNull()?.takeIf { it.isNotBlank() } ?: "bundled (older)"
+    }
+
+    /** Tags look like 2026.10.21 (sometimes 2026.10.21.1), so plain text comparison orders them correctly. */
+    private fun older(v: String?, than: String) = v.isNullOrBlank() || v < than
+
+    /**
+     * First start (or still on the bundled yt-dlp): install [MIN_VERSION]. Media jobs wait for this (they need
+     * the read lock), so nothing runs on the old version. Falls back to the latest stable release if that tag
+     * can't be fetched; tried again on the next start if offline.
+     */
+    private fun ensureMinimum(app: Context) {
+        if (!older(runCatching { YoutubeDL.getInstance().version(app) }.getOrNull(), MIN_VERSION)) return
+        if (!lock.writeLock().tryLock(15, java.util.concurrent.TimeUnit.SECONDS)) return
+        updating = true
+        try {
+            val ok = runCatching { YoutubeDL.getInstance().updateYoutubeDL(app, pinned) }.isSuccess
+            if (!ok) runCatching { YoutubeDL.getInstance().updateYoutubeDL(app, YoutubeDL.UpdateChannel.STABLE) }
+            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong("lastCheck", System.currentTimeMillis()).apply()
+        } finally {
+            updating = false
+            lock.writeLock().unlock()
+        }
     }
 
     fun lastCheck(ctx: Context): Long = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong("lastCheck", 0L)

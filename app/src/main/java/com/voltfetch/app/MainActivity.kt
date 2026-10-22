@@ -554,6 +554,8 @@ class MainActivity : Activity() {
         if (prefs.getString("lastClip", "") == url) return
         prefs.edit().putString("lastClip", url).apply()
         if (engine.views().any { it.url == url }) return
+        // a copied video link: start looking it up now, so the Media downloader opens with it ready
+        if (com.voltfetch.engine.MediaSites.isKnown(url) && !Links.looksLikeFile(url)) Inspector.prefetch(this, url)
         clipOffer = url
         bannerSig = ""
         refresh()

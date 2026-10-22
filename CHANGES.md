@@ -1,3 +1,11 @@
+# Changes, round 6: faster checks, clipboard, yt-dlp 2026.10.21, new logo
+
+- **yt-dlp 2026.10.21:** installed automatically on first start (from yt-dlp's official GitHub release) before any media job runs; the bundled library version is from late 2025. Settings shows the installed version tag.
+- **Link box:** the newest copied link fills in each time the Media downloader comes to the front, and is checked at once.
+- **Faster:** quality and audio buttons work immediately (the exact list loads in the background); YouTube/Vimeo titles and thumbnails appear in about a second; video and playlist are checked in parallel; results are cached for 15 minutes; a copied video link is looked up in the background as soon as VoltFetch sees it.
+- **New logo and app icon:** flat lightning-bolt download arrow on a blue-violet gradient; adaptive, round and themed (monochrome) icons, splash icon, in-app logo.
+- **Release signing:** a keystore is provided separately; add its 4 values as GitHub secrets so every build installs over the previous one.
+
 # Changes, round 5: browser that stays open
 
 - **Home button** in the browser's top bar returns to the main screen; the browser stays open behind it (page, history, scroll position). The main screen's **Browser** button brings it back exactly where you left it.

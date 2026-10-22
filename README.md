@@ -27,7 +27,7 @@ yt-dlp's traffic goes through a small local proxy inside the app. This means the
 
 ### Keeping yt-dlp current
 
-YouTube changes often. **Settings › Media engine › Update media engine** downloads the latest stable yt-dlp release. A weekly automatic check runs on Wi-Fi only and never while a media job is running. The engine starts in the background, so first launch is not blocked while the Python runtime unpacks.
+YouTube changes often. On first start the app installs yt-dlp **2026.10.21** (the bundled library ships an older one). **Settings › Media engine › Update media engine** downloads the latest stable yt-dlp release. A weekly automatic check runs on Wi-Fi only and never while a media job is running. The engine starts in the background, so first launch is not blocked while the Python runtime unpacks.
 
 ### Compatibility
 
