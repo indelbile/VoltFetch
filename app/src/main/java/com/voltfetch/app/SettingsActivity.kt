@@ -104,6 +104,16 @@ class SettingsActivity : Screen() {
             toggleRow("Check for updates weekly", "Only on Wi-Fi, and never while a media download is running.", MediaEngine.autoUpdate(this)) { MediaEngine.setAutoUpdate(this, it) },
         )
 
+        // Browser ad blocker
+        val adLast = AdBlock.lastUpdate(this)
+        section("Browser",
+            toggleRow("Block ads and trackers", "In VoltFetch's browser: ad and tracker servers, YouTube video ads and ad boxes. The shield in the address bar turns it off for one site.", AdBlock.enabled(this)) { AdBlock.setEnabled(this, it) },
+            navRow(R.drawable.ic_shield, "Update ad filter lists", "${"%,d".format(AdBlock.rules())} rules · ${if (adLast > 0) "updated ${whenText(adLast)}" else "built-in list; updates on first browser use"}", p.done) {
+                toast("Updating ad filter lists…")
+                AdBlock.refreshAsync(this) { n -> runOnUiThread { if (!isFinishing && !isDestroyed) { toast(if (n < 0) "Couldn't update the lists" else "Updated: ${"%,d".format(n)} rules"); frame() } } }
+            },
+        )
+
         // Followed playlists: checked every night, new videos are queued
         val follows = PlaylistSync.list(this)
         section("Followed playlists",

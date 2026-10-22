@@ -74,4 +74,6 @@ dependencies {
     // On-device yt-dlp + Python runtime and bundled FFmpeg. No companion computer/server.
     implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
+    // runs the ad blocker's script before a page's own scripts (needed to remove YouTube video ads)
+    implementation("androidx.webkit:webkit:1.12.1")
 }

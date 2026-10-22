@@ -32,6 +32,7 @@ import android.widget.Toast
 import com.voltfetch.engine.Links
 import com.voltfetch.engine.Names
 import com.voltfetch.engine.NoCapture
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * A browser for finding files. It notices video and audio a page loads, offers "Download with VoltFetch"
@@ -52,6 +53,14 @@ class BrowserActivity : Activity() {
     private lateinit var address: EditText
     private lateinit var lock: ImageView
     private lateinit var reload: ImageView
+    private lateinit var shield: ImageView
+    /** Host of the page on screen; read on WebView's network thread. */
+    @Volatile private var pageHost = ""
+    private val blockedOnPage = AtomicInteger()
+    private var adScript: androidx.webkit.ScriptHandler? = null
+    /** Old WebView without document-start scripts: the ad script is injected when each page starts instead. */
+    private var adFallback = false
+    @Volatile private var shieldQueued = false
     private lateinit var progress: View
     private lateinit var home: ScrollView
     private lateinit var pill: TextView
@@ -97,6 +106,8 @@ class BrowserActivity : Activity() {
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
         registerForContextMenu(web)
+        AdBlock.load(this)
+        installAdScript()
         root.addView(web, FrameLayout.LayoutParams(-1, -1))
 
         home = buildHome()
@@ -192,6 +203,9 @@ class BrowserActivity : Activity() {
             setOnFocusChangeListener { _, f -> if (f) setText(pageUrl.ifEmpty { "" }) else showAddress() }
         }
         field.addView(address, lp(0, dp(44), 1f))
+        // ad blocker on/off: green shield = on, tap for options and the count for this page
+        shield = k.iconButton(R.drawable.ic_shield, "Ad blocker", p.done) { adDialog() }
+        field.addView(shield, LinearLayout.LayoutParams(dp(36), dp(40)))
         reload = k.iconButton(R.drawable.ic_refresh, "Reload") { if (loading) web.stopLoading() else if (pageUrl.isNotEmpty()) web.reload() }
         field.addView(reload, LinearLayout.LayoutParams(dp(40), dp(40)))
         b.addView(field, lp(0, dp(46), 1f))
@@ -304,6 +318,7 @@ class BrowserActivity : Activity() {
             if (pageUrl.isNotEmpty()) web.reload()
             toast(if (desktop) "Mobile site" else "Desktop site")
         })
+        items.add((if (AdBlock.enabled(this)) "Ad blocker: on" else "Ad blocker: off") to { adDialog() })
         items.add("Start page" to { web.loadUrl("about:blank"); showHome() })
         items.add("Back to VoltFetch (keep this page)" to { minimize() })
         items.add("Close browser" to { closeBrowser() })
@@ -316,6 +331,70 @@ class BrowserActivity : Activity() {
                 }.setNegativeButton("Cancel", null).show()
         })
         dialogB().setItems(items.map { it.first }.toTypedArray()) { _, i -> items[i].second() }.show()
+    }
+
+    // ------------------------------------------------------------------ ad blocker
+
+    /** Runs the ad script at the start of every page, before the page's own scripts (needed for YouTube). */
+    private fun installAdScript() {
+        runCatching { adScript?.remove() }
+        adScript = null
+        if (!AdBlock.enabled(this)) return
+        if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            adScript = runCatching { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(web, AdBlock.script(this), setOf("*")) }.getOrNull()
+            adFallback = adScript == null
+        } else adFallback = true
+    }
+
+    private fun queueShield() {
+        if (shieldQueued) return
+        shieldQueued = true
+        root.postDelayed({ shieldQueued = false; updateShield() }, 400)
+    }
+
+    private fun updateShield() {
+        if (!::shield.isInitialized) return
+        val on = AdBlock.enabled(this)
+        val here = on && !AdBlock.isAllowed(this, pageHost)
+        shield.imageTintList = android.content.res.ColorStateList.valueOf(if (here) p.done else if (on) p.hold else p.faint)
+        shield.alpha = if (here) 1f else .7f
+        shield.contentDescription = when {
+            !on -> "Ad blocker off"
+            !here -> "Ads allowed on this site"
+            else -> "Ad blocker on, ${blockedOnPage.get()} blocked on this page"
+        }
+    }
+
+    private fun adDialog() {
+        val on = AdBlock.enabled(this)
+        val site = if (pageHost.isNotEmpty()) com.voltfetch.engine.AdFilter.site(pageHost) else ""
+        val allowedHere = site.isNotEmpty() && AdBlock.isAllowed(this, pageHost)
+        val last = AdBlock.lastUpdate(this)
+        val msg = buildString {
+            append(when {
+                !on -> "Off: ads and trackers load normally."
+                allowedHere -> "On, but ads are allowed on $site."
+                else -> "On: ${blockedOnPage.get()} ads and trackers blocked on this page."
+            })
+            append("\n\n${"%,d".format(AdBlock.rules())} blocking rules · lists ")
+            append(if (AdBlock.updating) "updating now" else if (last > 0) "updated ${whenText(last)}" else "not downloaded yet (built-in list in use)")
+            append("\n\nBlocks ad and tracker servers, YouTube video ads and ad boxes. Facebook and Instagram sponsored posts are hidden when labelled \"Sponsored\". If a site doesn't work properly, allow ads on that site.")
+        }
+        val d = dialogB().setTitle("Ad blocker").setMessage(msg)
+            .setPositiveButton(if (on) "Turn off" else "Turn on") { _, _ ->
+                AdBlock.setEnabled(this, !on); installAdScript(); updateShield()
+                if (pageUrl.isNotEmpty()) web.reload()
+                toast(if (on) "Ad blocker off" else "Ad blocker on")
+            }
+            .setNegativeButton("Update lists") { _, _ ->
+                toast("Updating ad filter lists…")
+                AdBlock.refreshAsync(this) { n -> runOnUiThread { if (!isFinishing) toast(if (n < 0) "Couldn't update the lists. Check the connection." else "Updated: ${"%,d".format(n)} rules") } }
+            }
+        if (on && site.isNotEmpty()) d.setNeutralButton(if (allowedHere) "Block ads on $site" else "Allow ads on $site") { _, _ ->
+            AdBlock.setAllowed(this, pageHost, !allowedHere); installAdScript(); updateShield(); web.reload()
+            toast(if (allowedHere) "Blocking ads on $site" else "Ads allowed on $site")
+        }
+        d.show()
     }
 
     // ------------------------------------------------------------------ media detection
@@ -448,7 +527,13 @@ class BrowserActivity : Activity() {
         }
 
         override fun shouldInterceptRequest(view: WebView, req: WebResourceRequest): WebResourceResponse? {
-            consider(req.url.toString())
+            val url = req.url.toString()
+            if (req.isForMainFrame) { pageHost = req.url.host ?: ""; blockedOnPage.set(0); queueShield() }
+            else if (AdBlock.active(this@BrowserActivity, pageHost) && AdBlock.isAd(url, pageHost)) {
+                blockedOnPage.incrementAndGet(); queueShield()
+                return AdBlock.empty()
+            }
+            consider(url)
             return null
         }
 
@@ -457,6 +542,9 @@ class BrowserActivity : Activity() {
             loading = true
             if (url.substringBefore('#') != pageUrl.substringBefore('#')) { media.clear() }
             pageUrl = url
+            pageHost = runCatching { Uri.parse(url).host ?: "" }.getOrDefault("")
+            if (adFallback && AdBlock.active(this@BrowserActivity, pageHost)) view.evaluateJavascript(AdBlock.script(this@BrowserActivity), null)
+            updateShield()
             if (!address.hasFocus()) showAddress()
             reload.setImageResource(R.drawable.ic_x)
             updatePill()
@@ -468,6 +556,7 @@ class BrowserActivity : Activity() {
             reload.setImageResource(R.drawable.ic_refresh)
             progress.animate().alpha(0f).setDuration(300).start()
             pageTitle = view.title ?: ""
+            if (adFallback && AdBlock.active(this@BrowserActivity, pageHost)) view.evaluateJavascript(AdBlock.script(this@BrowserActivity), null)
             remember(url)
             // reopened at this page if the app is restarted
             if (url.startsWith("http") && home.visibility != View.VISIBLE) session.edit().putString("lastUrl", url).apply()
@@ -509,7 +598,12 @@ class BrowserActivity : Activity() {
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
     override fun onPause() { super.onPause(); web.onPause(); CookieManager.getInstance().flush() }
-    override fun onResume() { super.onResume(); web.onResume() }
+    override fun onResume() {
+        super.onResume(); web.onResume()
+        // the blocker may have been switched in Settings meanwhile
+        val wanted = AdBlock.enabled(this)
+        if (wanted != (adScript != null || adFallback)) { installAdScript(); if (!wanted) adFallback = false; updateShield() }
+    }
     override fun onDestroy() { (web.parent as? android.view.ViewGroup)?.removeView(web); web.destroy(); super.onDestroy() }
 
     companion object {

@@ -16,6 +16,7 @@ The media downloader embeds yt-dlp and FFmpeg, so no PC, server, Termux or other
 - **Sharing:** sharing a link from a known site opens the Media downloader; copying one offers it on the main screen. The share menu also has **Save video** and **Save audio**, which queue the link at once with your last-used choices.
 - **Automatic retry:** network failures are retried by themselves (30 s, 2 min, 5 min) and right away when the connection returns.
 - **Shortcuts:** long-press the app icon for Paste link, Media downloader and Browser.
+- **Ad blocker (browser):** blocks ad and tracker servers, YouTube video ads and ad boxes; Facebook/Instagram "Sponsored" posts are hidden. The shield in the address bar turns it off, or allows ads on one site.
 - **Browser stays open:** its Home button (or Back on the first page) returns to the main screen without closing the page; the Browser button brings it back where you left it. Close it from its menu.
 - Finished files are saved to `Download/VoltFetch/Video` or `Download/VoltFetch/Music`.
 

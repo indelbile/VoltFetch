@@ -1,3 +1,11 @@
+# Changes, round 7: ad blocker in the browser
+
+- **Network blocking:** requests to ad and tracker servers are blocked (built-in list plus Peter Lowe's and AdAway's community lists, downloaded on first use and refreshed weekly). A site's own domain is never blocked, so sites you open still load.
+- **YouTube:** ad data is removed from YouTube's player responses before the player sees it (the uBlock Origin / Brave technique), any ad that still appears is skipped, and banner/feed ads are hidden.
+- **Cosmetic:** leftover ad boxes (Google ads, Taboola, Outbrain…) are hidden; on Facebook and Instagram, posts labelled "Sponsored" are hidden (best effort; they come from the site itself).
+- **Shield button** in the address bar: green = on. Tap for the count on this page, Turn off / on, Allow ads on this site, Update lists. Also in the ⋯ menu, and in Settings › Browser.
+- New dependency: androidx.webkit (runs the script before a page's own scripts).
+
 # Changes, round 6: faster checks, clipboard, yt-dlp 2026.10.21, new logo
 
 - **yt-dlp 2026.10.21:** installed automatically on first start (from yt-dlp's official GitHub release) before any media job runs; the bundled library version is from late 2025. Settings shows the installed version tag.

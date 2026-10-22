@@ -508,6 +508,16 @@ fun main(args: Array<String>) {
     check("typed name not replaced by server's", v.name == "My copy.pdf", v.name)
     check("probe picks server name", e.probe("$base/dl/8f3a9c2e7b1d4f6a").name == "Annual Report.pdf")
 
+    // 13b. ad blocker
+    val af = AdFilter(AdFilter.BUILTIN + AdFilter.parse("# hosts\n0.0.0.0 tracker.example.org\n127.0.0.1 localhost\n||ads.example.net^\n||cdn.example.net/path^\n||x.example.io^\$third-party\nplain-ads.example.com\n! comment\n@@||good.example.com^"))
+    check("ads: built-in network blocked", af.isAd("https://securepubads.g.doubleclick.net/tag/js/gpt.js", "news.example.com") && af.isAd("https://www.googletagmanager.com/gtm.js", "x.com"))
+    check("ads: lists parsed (hosts, ||domain^, plain)", af.isAd("https://tracker.example.org/p.gif") && af.isAd("https://a.ads.example.net/x.js") && af.isAd("http://plain-ads.example.com/") && af.isAd("https://x.example.io/z"))
+    check("ads: unsafe rules ignored", !af.isAd("https://cdn.example.net/path") && !af.isAd("http://localhost/") && !af.isAd("https://good.example.com/"))
+    check("ads: ordinary sites untouched", !af.isAd("https://www.wikipedia.org/") && !af.isAd("https://i.ytimg.com/vi/x/hq.jpg") && !af.isAd("https://rr1---sn.googlevideo.com/videoplayback?x=1"))
+    check("ads: YouTube's own ad paths blocked", af.isAd("https://www.youtube.com/pagead/viewthroughconversion/1", "m.youtube.com") && af.isAd("https://m.youtube.com/api/stats/ads?x=1", "m.youtube.com") && !af.isAd("https://m.youtube.com/api/stats/watchtime", "m.youtube.com"))
+    check("ads: a site's own domain is never blocked", !af.isAd("https://cdn.taboola.com/x.js", "www.taboola.com") && af.isAd("https://cdn.taboola.com/x.js", "news.example.com"))
+    check("ads: same-site rules", AdFilter.site("news.bbc.co.uk") == "bbc.co.uk" && AdFilter.site("m.youtube.com") == "youtube.com" && AdFilter.sameSite("a.b.example.com", "example.com"))
+
     // 14. helpers
     check("json round trip", (Json.parse(Json.encode(mapOf("a" to "x\"y\n", "b" to listOf(1L, 2L), "c" to true))) as Map<*, *>)["a"] == "x\"y\n")
     check("links from shared text", Links.find("Look: https://ex.com/a.zip, and http://b.org/x.pdf.") == listOf("https://ex.com/a.zip", "http://b.org/x.pdf"))
